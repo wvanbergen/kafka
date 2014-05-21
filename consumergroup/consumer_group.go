@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Shopify/sarama"
@@ -43,6 +44,7 @@ type ConsumerGroup struct {
 	client *sarama.Client
 	zoo    *ZK
 	claims []PartitionConsumer
+	wg     sync.WaitGroup
 
 	zkchange <-chan zk.Event
 	claimed  chan *PartitionConsumer
@@ -50,7 +52,7 @@ type ConsumerGroup struct {
 
 	events chan *sarama.ConsumerEvent
 
-	checkout, force, stopper, done chan bool
+	checkout, force, stopper chan bool
 }
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
@@ -118,10 +120,11 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 		listener: listener,
 
 		stopper:  make(chan bool),
-		done:     make(chan bool),
 		checkout: make(chan bool),
 		force:    make(chan bool),
 		claimed:  make(chan *PartitionConsumer),
+
+		events: make(chan *sarama.ConsumerEvent),
 	}
 
 	// Register itself with zookeeper
@@ -130,6 +133,8 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 	}
 
 	go group.signalLoop()
+	go group.eventLoop()
+	group.wg.Add(2)
 	return group, nil
 }
 
@@ -156,55 +161,51 @@ func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error
 	return err
 }
 
-func (cg *ConsumerGroup) Stream(topic string) (chan *sarama.ConsumerEvent, error) {
+func (cg *ConsumerGroup) Stream() chan *sarama.ConsumerEvent {
+	return cg.events
+}
 
-	topicEvents := make(chan *sarama.ConsumerEvent)
+func (cg *ConsumerGroup) eventLoop() {
+EventLoop:
+	for {
+		select {
+		case <-cg.stopper:
+			close(cg.events)
+			break EventLoop
 
-	go func() {
-		for {
-			select {
-			case <-cg.stopper:
-				close(topicEvents)
-				return
+		default:
+			cg.Checkout(func(pc *PartitionConsumer) error {
+				log.Printf("Start consuming partition %d...", pc.partition)
 
-			default:
-				cg.Checkout(func(pc *PartitionConsumer) error {
-					log.Printf("Start consuming partition %d...", pc.partition)
+				partitionEvents := make(chan *sarama.ConsumerEvent)
+				partitionStopper := make(chan bool)
 
-					partitionEvents := make(chan *sarama.ConsumerEvent)
-					partitionStopper := make(chan bool)
+				go func() {
+					if err := pc.Fetch(partitionEvents, 1*time.Second); err != nil {
+						panic(fmt.Sprintf("Fetch failed: %s", err))
+					}
 
-					go func() {
-						if err := pc.Fetch(partitionEvents, 1*time.Second); err != nil {
-							log.Println("Fetch failed", err)
-						}
+					close(partitionStopper)
+				}()
 
-						close(partitionStopper)
-					}()
+				for {
+					select {
+					case <-partitionStopper:
+						return nil
 
-					var offset int64
-					for {
-						select {
-						case <-partitionStopper:
-							log.Printf("Last seen offset %d", offset)
-							return nil
-
-						case event, ok := <-partitionEvents:
-							if ok {
-								offset = event.Offset
-								topicEvents <- event
-							} else {
-								return errors.New("Failed to read event from channel!")
-							}
+					case event, ok := <-partitionEvents:
+						if ok {
+							cg.events <- event
+						} else {
+							return errors.New("Failed to read event from channel!")
 						}
 					}
-				})
-			}
-
+				}
+			})
 		}
-	}()
 
-	return topicEvents, nil
+	}
+	cg.wg.Done()
 }
 
 // Commit manually commits an offset for a partition
@@ -229,7 +230,7 @@ func (cg *ConsumerGroup) Claims() []int32 {
 // Close closes the consumer group
 func (cg *ConsumerGroup) Close() error {
 	close(cg.stopper)
-	<-cg.done
+	cg.wg.Wait()
 	return nil
 }
 
@@ -277,7 +278,7 @@ func (cg *ConsumerGroup) signalLoop() {
 // Stops the consumer group
 func (cg *ConsumerGroup) stop() {
 	cg.releaseClaims()
-	close(cg.done)
+	cg.wg.Done()
 }
 
 // Checkout a claimed partition consumer

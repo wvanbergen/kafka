@@ -106,6 +106,8 @@ func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration ti
 			if !ok {
 				return nil
 			} else if event.Err == sarama.OffsetOutOfRange {
+
+				// This is shitty and reallt needs reworking.
 				p.stream.Close()
 				if err := p.setSaramaConsumer(0); err != nil {
 					return err

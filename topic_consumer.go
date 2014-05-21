@@ -37,15 +37,10 @@ func init() {
 }
 
 func main() {
+	log.Printf("Joining consumer group for %s...", kafkaTopic)
 	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopic, zookeeper)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
-	}
-
-	log.Printf("Creating consumer for %s...", kafkaTopic)
-	stream, streamErr := consumer.Stream(kafkaTopic)
-	if streamErr != nil {
-		log.Fatalln(streamErr)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -58,6 +53,7 @@ func main() {
 	eventCount := 0
 	offsets := make(map[int32]int64)
 
+	stream := consumer.Stream()
 	for {
 		event, ok := <-stream
 		if !ok {
