@@ -1,4 +1,4 @@
-package kafkaconsumer
+package consumergroup
 
 import (
 	"fmt"
@@ -93,7 +93,7 @@ func (p *PartitionConsumer) setSaramaConsumer(lastSeenOffset int64) error {
 
 // Fetch returns a batch of events
 // WARNING: may return nil if not events are available
-func (p *PartitionConsumer) Fetch(stream chan *Event, duration time.Duration) error {
+func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration time.Duration) error {
 	events := p.stream.Events()
 	timeout := time.After(duration)
 
@@ -101,10 +101,10 @@ func (p *PartitionConsumer) Fetch(stream chan *Event, duration time.Duration) er
 		select {
 		case <-timeout:
 			return nil
+
 		case event, ok := <-events:
 			if !ok {
-				fmt.Println("events channel was closed")
-				return fmt.Errorf("events channel was closed")
+				return nil
 			} else if event.Err == sarama.OffsetOutOfRange {
 				p.stream.Close()
 				if err := p.setSaramaConsumer(0); err != nil {
@@ -117,7 +117,7 @@ func (p *PartitionConsumer) Fetch(stream chan *Event, duration time.Duration) er
 				return event.Err
 			}
 
-			stream <- &Event{ConsumerEvent: *event, Topic: p.topic, Partition: p.partition}
+			stream <- event
 			if event.Err == nil && event.Offset > p.offset {
 				p.offset = event.Offset
 			}

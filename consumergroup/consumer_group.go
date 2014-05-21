@@ -1,13 +1,10 @@
-package kafkaconsumer
+package consumergroup
 
 import (
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
-	"os"
 	"sort"
 	"time"
 
@@ -18,6 +15,12 @@ import (
 var (
 	DiscardCommit = errors.New("sarama: commit discarded")
 	NoCheckout    = errors.New("sarama: not checkout")
+)
+
+const (
+	REBALANCE_START uint8 = iota + 1
+	REBALANCE_OK
+	REBALANCE_ERROR
 )
 
 // A ConsumerGroup operates on all partitions of a single topic. The goal is to ensure
@@ -45,7 +48,33 @@ type ConsumerGroup struct {
 	claimed  chan *PartitionConsumer
 	listener chan *Notification
 
+	events chan *sarama.ConsumerEvent
+
 	checkout, force, stopper, done chan bool
+}
+
+// Connects to a consumer group, using Zookeeper for auto-discovery
+func JoinConsumerGroup(name string, topic string, zookeeper []string) (cg *ConsumerGroup, err error) {
+	if len(zookeeper) == 0 {
+		return nil, errors.New("You need to provide at least one zookeeper node address!")
+	}
+
+	var zk *ZK
+	if zk, err = NewZK(zookeeper, 1*time.Second); err != nil {
+		return nil, err
+	}
+
+	var kafkaBrokers []string
+	if kafkaBrokers, err = zk.Brokers(); err != nil {
+		return
+	}
+
+	var client *sarama.Client
+	if client, err = sarama.NewClient(name, kafkaBrokers, &clientConfig); err != nil {
+		return
+	}
+
+	return NewConsumerGroup(client, zk, name, topic, nil, &consumerConfig)
 }
 
 // NewConsumerGroup creates a new consumer group for a given topic.
@@ -125,6 +154,57 @@ func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error
 		err = cg.Commit(claimed.partition, claimed.offset)
 	}
 	return err
+}
+
+func (cg *ConsumerGroup) Stream(topic string) (chan *sarama.ConsumerEvent, error) {
+
+	topicEvents := make(chan *sarama.ConsumerEvent)
+
+	go func() {
+		for {
+			select {
+			case <-cg.stopper:
+				close(topicEvents)
+				return
+
+			default:
+				cg.Checkout(func(pc *PartitionConsumer) error {
+					log.Printf("Start consuming partition %d...", pc.partition)
+
+					partitionEvents := make(chan *sarama.ConsumerEvent)
+					partitionStopper := make(chan bool)
+
+					go func() {
+						if err := pc.Fetch(partitionEvents, 1*time.Second); err != nil {
+							log.Println("Fetch failed", err)
+						}
+
+						close(partitionStopper)
+					}()
+
+					var offset int64
+					for {
+						select {
+						case <-partitionStopper:
+							log.Printf("Last seen offset %d", offset)
+							return nil
+
+						case event, ok := <-partitionEvents:
+							if ok {
+								offset = event.Offset
+								topicEvents <- event
+							} else {
+								return errors.New("Failed to read event from channel!")
+							}
+						}
+					}
+				})
+			}
+
+		}
+	}()
+
+	return topicEvents, nil
 }
 
 // Commit manually commits an offset for a partition
@@ -336,34 +416,4 @@ func validateConsumerConfig(config *sarama.ConsumerConfig) error {
 	}
 
 	return nil
-}
-
-func generateUUID() (string, error) {
-	uuid := make([]byte, 16)
-	n, err := io.ReadFull(rand.Reader, uuid)
-	if n != len(uuid) || err != nil {
-		return "", err
-	}
-	// variant bits; see section 4.1.1
-	uuid[8] = uuid[8]&^0xc0 | 0x80
-	// version 4 (pseudo-random); see section 4.1.3
-	uuid[6] = uuid[6]&^0xf0 | 0x40
-	return fmt.Sprintf("%x-%x-%x-%x-%x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:]), nil
-}
-
-func generateConsumerID() (consumerID string, err error) {
-	var uuid, hostname string
-
-	uuid, err = generateUUID()
-	if err != nil {
-		return
-	}
-
-	hostname, err = os.Hostname()
-	if err != nil {
-		return
-	}
-
-	consumerID = fmt.Sprintf("%s:%s", hostname, uuid)
-	return
 }

@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/wvanbergen/kafkacluster/kafkaconsumer"
+	"github.com/wvanbergen/kafkacluster/consumergroup"
 )
 
 const (
@@ -37,7 +37,7 @@ func init() {
 }
 
 func main() {
-	consumer, consumerErr := kafkaconsumer.NewKafkaConsumer(consumerGroup, zookeeper)
+	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopic, zookeeper)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
 	}

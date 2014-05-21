@@ -1,4 +1,4 @@
-package kafkaconsumer
+package consumergroup
 
 import (
 	"encoding/json"
