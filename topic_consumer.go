@@ -53,22 +53,24 @@ func main() {
 	go func() {
 		<-c
 		consumer.Close()
-		os.Exit(130)
 	}()
 
+	eventCount := 0
 	offsets := make(map[int32]int64)
 
 	for {
 		event, ok := <-stream
 		if !ok {
-			log.Println("Consumer is done")
-			return
+			break
 		}
 
+		eventCount += 1
 		if offsets[event.Partition] != 0 && offsets[event.Partition] != event.Offset-1 {
 			log.Printf("Unexpected offset on partition %d: %d. Expected %d\n", event.Partition, event.Offset, offsets[event.Partition]+1)
 		}
 
 		offsets[event.Partition] = event.Offset
 	}
+
+	log.Printf("Processed %d events.", eventCount)
 }

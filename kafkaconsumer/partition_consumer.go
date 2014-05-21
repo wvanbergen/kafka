@@ -37,6 +37,7 @@ func (b *EventBatch) offsetIsOutOfRange() bool {
 // PartitionConsumer can consume a single partition of a single topic
 type PartitionConsumer struct {
 	stream    EventStream
+	group     *ConsumerGroup
 	topic     string
 	partition int32
 	offset    int64
@@ -44,33 +45,50 @@ type PartitionConsumer struct {
 
 // NewPartitionConsumer creates a new partition consumer instance
 func NewPartitionConsumer(group *ConsumerGroup, partition int32) (*PartitionConsumer, error) {
+
+	lastSeenOffset, offsetErr := group.Offset(partition)
+	if offsetErr != nil {
+		return nil, offsetErr
+	}
+
+	p := &PartitionConsumer{
+		group:     group,
+		topic:     group.topic,
+		partition: partition,
+	}
+
+	if err := p.setSaramaConsumer(lastSeenOffset); err != nil {
+		return nil, err
+	}
+
+	return p, nil
+}
+
+func (p *PartitionConsumer) setSaramaConsumer(lastSeenOffset int64) error {
 	config := sarama.ConsumerConfig{
-		DefaultFetchSize: group.config.DefaultFetchSize,
-		EventBufferSize:  group.config.EventBufferSize,
-		MaxMessageSize:   group.config.MaxMessageSize,
-		MaxWaitTime:      group.config.MaxWaitTime,
-		MinFetchSize:     group.config.MinFetchSize,
+		DefaultFetchSize: p.group.config.DefaultFetchSize,
+		EventBufferSize:  p.group.config.EventBufferSize,
+		MaxMessageSize:   p.group.config.MaxMessageSize,
+		MaxWaitTime:      p.group.config.MaxWaitTime,
+		MinFetchSize:     p.group.config.MinFetchSize,
 		OffsetMethod:     sarama.OffsetMethodOldest,
 	}
 
-	offset, err := group.Offset(partition)
-	if err != nil {
-		return nil, err
-	} else if offset > 0 {
+	if lastSeenOffset > 0 {
+		fmt.Printf("Requesting to resume from offset %d\n", lastSeenOffset)
 		config.OffsetMethod = sarama.OffsetMethodManual
-		config.OffsetValue = offset + 1
+		config.OffsetValue = lastSeenOffset + 1
+	} else {
+		fmt.Printf("Starting from offset 0\n")
 	}
 
-	stream, err := sarama.NewConsumer(group.client, group.topic, partition, group.name, &config)
+	consumer, err := sarama.NewConsumer(p.group.client, p.group.topic, p.partition, p.group.name, &config)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return &PartitionConsumer{
-		stream:    stream,
-		topic:     group.topic,
-		partition: partition,
-	}, nil
+	p.stream = consumer
+	return nil
 }
 
 // Fetch returns a batch of events
@@ -85,11 +103,20 @@ func (p *PartitionConsumer) Fetch(stream chan *Event, duration time.Duration) er
 			return nil
 		case event, ok := <-events:
 			if !ok {
+				fmt.Println("events channel was closed")
 				return fmt.Errorf("events channel was closed")
-			}
-			if event.Err != nil {
+			} else if event.Err == sarama.OffsetOutOfRange {
+				p.stream.Close()
+				if err := p.setSaramaConsumer(0); err != nil {
+					return err
+				}
+
+				return p.Fetch(stream, duration)
+			} else if event.Err != nil {
+				fmt.Println("Fail", event.Err)
 				return event.Err
 			}
+
 			stream <- &Event{ConsumerEvent: *event, Topic: p.topic, Partition: p.partition}
 			if event.Err == nil && event.Offset > p.offset {
 				p.offset = event.Offset

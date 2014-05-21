@@ -97,22 +97,26 @@ func (kc *KafkaConsumer) Stream(topic string) (chan *Event, error) {
 					partitionStopper := make(chan bool)
 
 					go func() {
-						log.Println("Starting fetch...")
-						pc.Fetch(partitionChannel, 1*time.Second)
-						log.Println("Done fetch...")
+						if err := pc.Fetch(partitionChannel, 1*time.Second); err != nil {
+							log.Println("Fetch failed", err)
+						}
+
 						close(partitionStopper)
 					}()
 
+					var offset int64
 					for {
 						select {
 						case <-partitionStopper:
+							log.Printf("Last seen offset %d", offset)
 							return nil
 
 						case event, ok := <-partitionChannel:
 							if ok {
+								offset = event.Offset
 								topicChannel <- event
 							} else {
-								return nil
+								return errors.New("Failed to read event from channel!")
 							}
 						}
 					}
