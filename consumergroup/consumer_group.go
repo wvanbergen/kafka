@@ -161,7 +161,7 @@ func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error
 	return err
 }
 
-func (cg *ConsumerGroup) Stream() chan *sarama.ConsumerEvent {
+func (cg *ConsumerGroup) Stream() <-chan *sarama.ConsumerEvent {
 	return cg.events
 }
 
@@ -314,7 +314,7 @@ func (cg *ConsumerGroup) rebalance() (err error) {
 	}
 
 	// Get leaders for each partition ID
-	parts := make(PartitionSlice, len(pids))
+	parts := make(partitionSlice, len(pids))
 	for i, pid := range pids {
 		var broker *sarama.Broker
 		if broker, err = cg.client.Leader(cg.topic, pid); err != nil {
@@ -322,7 +322,7 @@ func (cg *ConsumerGroup) rebalance() (err error) {
 			return
 		}
 		defer broker.Close()
-		parts[i] = Partition{Id: pid, Addr: broker.Addr()}
+		parts[i] = partitionLeader{id: pid, leader: broker.Addr()}
 	}
 
 	if err = cg.makeClaims(cids, parts); err != nil {
@@ -333,11 +333,11 @@ func (cg *ConsumerGroup) rebalance() (err error) {
 	return
 }
 
-func (cg *ConsumerGroup) makeClaims(cids []string, parts PartitionSlice) error {
+func (cg *ConsumerGroup) makeClaims(cids []string, parts partitionSlice) error {
 	cg.releaseClaims()
 
 	for _, part := range cg.claimRange(cids, parts) {
-		pc, err := NewPartitionConsumer(cg, part.Id)
+		pc, err := NewPartitionConsumer(cg, part.id)
 		if err != nil {
 			return err
 		}
@@ -357,7 +357,7 @@ func (cg *ConsumerGroup) makeClaims(cids []string, parts PartitionSlice) error {
 }
 
 // Determine the partititons dumber to claim
-func (cg *ConsumerGroup) claimRange(cids []string, parts PartitionSlice) PartitionSlice {
+func (cg *ConsumerGroup) claimRange(cids []string, parts partitionSlice) partitionSlice {
 	sort.Strings(cids)
 	sort.Sort(parts)
 
@@ -365,7 +365,7 @@ func (cg *ConsumerGroup) claimRange(cids []string, parts PartitionSlice) Partiti
 	clen := len(cids)
 	plen := len(parts)
 	if cpos >= clen || cpos >= plen {
-		return make(PartitionSlice, 0)
+		return make(partitionSlice, 0)
 	}
 
 	step := int(math.Ceil(float64(plen) / float64(clen)))

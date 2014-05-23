@@ -18,22 +18,25 @@ var (
 // COMMON TYPES
 
 // Partition information
-type Partition struct {
-	Id   int32
-	Addr string // Leader address
+type partitionLeader struct {
+	id     int32
+	leader string
 }
 
 // A sortable slice of Partition structs
-type PartitionSlice []Partition
+type partitionSlice []partitionLeader
 
-func (s PartitionSlice) Len() int { return len(s) }
-func (s PartitionSlice) Less(i, j int) bool {
-	if s[i].Addr < s[j].Addr {
+func (s partitionSlice) Len() int {
+	return len(s)
+}
+
+func (s partitionSlice) Less(i, j int) bool {
+	if s[i].leader < s[j].leader {
 		return true
 	}
-	return s[i].Id < s[j].Id
+	return s[i].id < s[j].id
 }
-func (s PartitionSlice) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s partitionSlice) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
 // A subscribable notification
 type Notification struct {
