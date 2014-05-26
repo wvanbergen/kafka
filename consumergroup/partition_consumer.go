@@ -65,24 +65,18 @@ func NewPartitionConsumer(group *ConsumerGroup, partition int32) (*PartitionCons
 }
 
 func (p *PartitionConsumer) setSaramaConsumer(lastSeenOffset int64) error {
-	config := sarama.ConsumerConfig{
-		DefaultFetchSize: p.group.config.DefaultFetchSize,
-		EventBufferSize:  p.group.config.EventBufferSize,
-		MaxMessageSize:   p.group.config.MaxMessageSize,
-		MaxWaitTime:      p.group.config.MaxWaitTime,
-		MinFetchSize:     p.group.config.MinFetchSize,
-		OffsetMethod:     sarama.OffsetMethodOldest,
-	}
+	consumerConfig := *p.group.config.KafkaConsumerConfig
+	consumerConfig.OffsetMethod = sarama.OffsetMethodOldest
 
 	if lastSeenOffset > 0 {
 		fmt.Printf("Requesting to resume from offset %d\n", lastSeenOffset)
-		config.OffsetMethod = sarama.OffsetMethodManual
-		config.OffsetValue = lastSeenOffset + 1
+		consumerConfig.OffsetMethod = sarama.OffsetMethodManual
+		consumerConfig.OffsetValue = lastSeenOffset + 1
 	} else {
 		fmt.Printf("Starting from offset 0\n")
 	}
 
-	consumer, err := sarama.NewConsumer(p.group.client, p.group.topic, p.partition, p.group.name, &config)
+	consumer, err := sarama.NewConsumer(p.group.client, p.group.topic, p.partition, p.group.name, &consumerConfig)
 	if err != nil {
 		return err
 	}

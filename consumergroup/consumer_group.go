@@ -24,6 +24,48 @@ const (
 	REBALANCE_ERROR
 )
 
+type ConsumerGroupConfig struct {
+	// The Zookeeper timeout
+	ZookeeperTimeout time.Duration
+
+	// The preempt interval when listening to a single partition of a topic.
+	// After this interval, the current offset will be committed to Zookeeper,
+	// and a different partition will be checked out to consume next.
+	CheckoutInterval time.Duration
+
+	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new Client
+	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new Consumer
+}
+
+func NewConsumerGroupConfig() *ConsumerGroupConfig {
+	return &ConsumerGroupConfig{
+		ZookeeperTimeout:    1 * time.Second,
+		CheckoutInterval:    1 * time.Second,
+		KafkaClientConfig:   sarama.NewClientConfig(),
+		KafkaConsumerConfig: sarama.NewConsumerConfig(),
+	}
+}
+
+func (cgc *ConsumerGroupConfig) Validate() error {
+	if cgc.ZookeeperTimeout <= 0 {
+		return errors.New("ZookeeperTimeout should have a duration > 0")
+	}
+
+	if cgc.KafkaClientConfig == nil {
+		return errors.New("KafkaClientConfig is not set!")
+	} else if err := cgc.KafkaClientConfig.Validate(); err != nil {
+		return err
+	}
+
+	if cgc.KafkaConsumerConfig == nil {
+		return errors.New("KafkaConsumerConfig is not set!")
+	} else if err := cgc.KafkaConsumerConfig.Validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // A ConsumerGroup operates on all partitions of a single topic. The goal is to ensure
 // each topic message is consumed only once, no matter of the number of consumer instances within
 // a cluster, as described in: http://kafka.apache.org/documentation.html#distributionimpl.
@@ -40,7 +82,8 @@ const (
 type ConsumerGroup struct {
 	id, name, topic string
 
-	config *sarama.ConsumerConfig
+	config *ConsumerGroupConfig
+
 	client *sarama.Client
 	zoo    *ZK
 	claims []PartitionConsumer
@@ -56,13 +99,22 @@ type ConsumerGroup struct {
 }
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
-func JoinConsumerGroup(name string, topic string, zookeeper []string) (cg *ConsumerGroup, err error) {
+func JoinConsumerGroup(name string, topic string, zookeeper []string, config *ConsumerGroupConfig) (cg *ConsumerGroup, err error) {
+
+	if config == nil {
+		config = NewConsumerGroupConfig()
+	}
+
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
 	if len(zookeeper) == 0 {
 		return nil, errors.New("You need to provide at least one zookeeper node address!")
 	}
 
 	var zk *ZK
-	if zk, err = NewZK(zookeeper, 1*time.Second); err != nil {
+	if zk, err = NewZK(zookeeper, config.ZookeeperTimeout); err != nil {
 		return nil, err
 	}
 
@@ -72,21 +124,18 @@ func JoinConsumerGroup(name string, topic string, zookeeper []string) (cg *Consu
 	}
 
 	var client *sarama.Client
-	if client, err = sarama.NewClient(name, kafkaBrokers, &clientConfig); err != nil {
+	if client, err = sarama.NewClient(name, kafkaBrokers, config.KafkaClientConfig); err != nil {
 		return
 	}
 
-	return NewConsumerGroup(client, zk, name, topic, nil, &consumerConfig)
+	return NewConsumerGroup(client, zk, name, topic, nil, config)
 }
 
 // NewConsumerGroup creates a new consumer group for a given topic.
 //
 // You MUST call Close() on a consumer to avoid leaks, it will not be garbage-collected automatically when
 // it passes out of scope (this is in addition to calling Close on the underlying client, which is still necessary).
-func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string, listener chan *Notification, config *sarama.ConsumerConfig) (group *ConsumerGroup, err error) {
-	if config == nil {
-		config = new(sarama.ConsumerConfig)
-	}
+func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string, listener chan *Notification, config *ConsumerGroupConfig) (group *ConsumerGroup, err error) {
 
 	// Validate configuration
 	if err = config.Validate(); err != nil {
@@ -181,7 +230,7 @@ EventLoop:
 				partitionStopper := make(chan bool)
 
 				go func() {
-					if err := pc.Fetch(partitionEvents, 1*time.Second); err != nil {
+					if err := pc.Fetch(partitionEvents, pc.group.config.CheckoutInterval); err != nil {
 						panic(fmt.Sprintf("Fetch failed: %s", err))
 					}
 
