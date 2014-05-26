@@ -1,7 +1,6 @@
 package consumergroup
 
 import (
-	"fmt"
 	"github.com/Shopify/sarama"
 	"time"
 )
@@ -69,11 +68,11 @@ func (p *PartitionConsumer) setSaramaConsumer(lastSeenOffset int64) error {
 	consumerConfig.OffsetMethod = sarama.OffsetMethodOldest
 
 	if lastSeenOffset > 0 {
-		fmt.Printf("Requesting to resume from offset %d\n", lastSeenOffset)
+		sarama.Logger.Printf("Requesting to resume from offset %d\n", lastSeenOffset)
 		consumerConfig.OffsetMethod = sarama.OffsetMethodManual
 		consumerConfig.OffsetValue = lastSeenOffset + 1
 	} else {
-		fmt.Printf("Starting from offset 0\n")
+		sarama.Logger.Printf("Starting from offset 0\n")
 	}
 
 	consumer, err := sarama.NewConsumer(p.group.client, p.group.topic, p.partition, p.group.name, &consumerConfig)
@@ -109,7 +108,7 @@ func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration ti
 
 				return p.Fetch(stream, duration)
 			} else if event.Err != nil {
-				fmt.Println("Fail", event.Err)
+				sarama.Logger.Println("Fail", event.Err)
 				return event.Err
 			}
 

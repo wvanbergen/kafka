@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/Shopify/sarama"
 	"github.com/wvanbergen/kafka/consumergroup"
 )
 
@@ -34,6 +35,8 @@ func init() {
 	}
 
 	zookeeper = strings.Split(*zookeeperCSV, ",")
+
+	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags)
 }
 
 func main() {

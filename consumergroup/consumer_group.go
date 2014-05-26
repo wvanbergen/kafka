@@ -3,7 +3,6 @@ package consumergroup
 import (
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"sort"
 	"sync"
@@ -204,7 +203,7 @@ func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error
 	if err == DiscardCommit {
 		err = nil
 	} else if err == nil && claimed.offset > 0 {
-		log.Printf("Committing partition %d offset %d", claimed.partition, claimed.offset)
+		sarama.Logger.Printf("Committing partition %d offset %d", claimed.partition, claimed.offset)
 		err = cg.Commit(claimed.partition, claimed.offset)
 	}
 	return err
@@ -224,7 +223,7 @@ EventLoop:
 
 		default:
 			cg.Checkout(func(pc *PartitionConsumer) error {
-				log.Printf("Start consuming partition %d...", pc.partition)
+				sarama.Logger.Printf("Start consuming partition %d...", pc.partition)
 
 				partitionEvents := make(chan *sarama.ConsumerEvent)
 				partitionStopper := make(chan bool)
@@ -432,7 +431,7 @@ func (cg *ConsumerGroup) claimRange(cids []string, parts partitionSlice) partiti
 // Releases all claims
 func (cg *ConsumerGroup) releaseClaims() {
 	for _, pc := range cg.claims {
-		fmt.Printf("Releasing claim for partition %d...\n", pc.partition)
+		sarama.Logger.Printf("Releasing claim for partition %d...\n", pc.partition)
 		pc.Close()
 		cg.zoo.Release(cg.name, cg.topic, pc.partition, cg.id)
 	}
