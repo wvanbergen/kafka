@@ -56,23 +56,22 @@ func NewPartitionConsumer(group *ConsumerGroup, partition int32) (*PartitionCons
 		partition: partition,
 	}
 
-	if err := p.setSaramaConsumer(lastSeenOffset); err != nil {
+	if err := p.setSaramaConsumer(*group.config.KafkaConsumerConfig, lastSeenOffset); err != nil {
 		return nil, err
 	}
 
 	return p, nil
 }
 
-func (p *PartitionConsumer) setSaramaConsumer(lastSeenOffset int64) error {
-	consumerConfig := *p.group.config.KafkaConsumerConfig
+func (p *PartitionConsumer) setSaramaConsumer(consumerConfig sarama.ConsumerConfig, lastSeenOffset int64) error {
 	consumerConfig.OffsetMethod = sarama.OffsetMethodOldest
 
 	if lastSeenOffset > 0 {
-		sarama.Logger.Printf("Requesting to resume from offset %d\n", lastSeenOffset)
+		sarama.Logger.Printf("[Partition consumer] Requesting to resume partition %d from offset %d\n", p.partition, lastSeenOffset)
 		consumerConfig.OffsetMethod = sarama.OffsetMethodManual
 		consumerConfig.OffsetValue = lastSeenOffset + 1
 	} else {
-		sarama.Logger.Printf("Starting from offset 0\n")
+		sarama.Logger.Printf("[Partition consumer] No committed offset for partition %d, starting from oldest offset.", p.partition)
 	}
 
 	consumer, err := sarama.NewConsumer(p.group.client, p.group.topic, p.partition, p.group.name, &consumerConfig)
@@ -99,16 +98,17 @@ func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration ti
 			if !ok {
 				return nil
 			} else if event.Err == sarama.OffsetOutOfRange {
+				sarama.Logger.Printf("[Partition consumer] Committed offset %d for partition %d is out of range, starting with the oldest offset instead.", p.offset, p.partition)
 
-				// This is shitty and reallt needs reworking.
+				// This is shitty and really needs reworking.
 				p.stream.Close()
-				if err := p.setSaramaConsumer(0); err != nil {
+				if err := p.setSaramaConsumer(*p.group.config.KafkaConsumerConfig, 0); err != nil {
 					return err
 				}
 
 				return p.Fetch(stream, duration)
 			} else if event.Err != nil {
-				sarama.Logger.Println("Fail", event.Err)
+				sarama.Logger.Println("[Partition consumer] ERROR:", event.Err)
 				return event.Err
 			}
 
