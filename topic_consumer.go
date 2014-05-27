@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -56,19 +57,19 @@ func main() {
 	eventCount := 0
 	offsets := make(map[int32]int64)
 
-	stream := consumer.Stream()
-	for {
-		event, ok := <-stream
-		if !ok {
-			break
-		}
-
+	err := consumer.Process(func(event *sarama.ConsumerEvent) error {
 		eventCount += 1
 		if offsets[event.Partition] != 0 && offsets[event.Partition] != event.Offset-1 {
-			log.Printf("Unexpected offset on partition %d: %d. Expected %d\n", event.Partition, event.Offset, offsets[event.Partition]+1)
+
+			return fmt.Errorf("Unexpected offset on partition %d: %d. Expected %d", event.Partition, event.Offset, offsets[event.Partition]+1)
 		}
 
 		offsets[event.Partition] = event.Offset
+		return nil
+	})
+
+	if err != nil {
+		log.Println("ERROR", err)
 	}
 
 	log.Printf("Processed %d events.", eventCount)

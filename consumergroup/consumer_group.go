@@ -2,7 +2,6 @@ package consumergroup
 
 import (
 	"errors"
-	"fmt"
 	"math"
 	"sort"
 	"sync"
@@ -13,8 +12,7 @@ import (
 )
 
 var (
-	DiscardCommit = errors.New("sarama: commit discarded")
-	NoCheckout    = errors.New("sarama: not checkout")
+	NoCheckout = errors.New("sarama: not checkout")
 )
 
 const (
@@ -24,27 +22,34 @@ const (
 )
 
 type ConsumerGroupConfig struct {
-	// The Zookeeper timeout
-	ZookeeperTimeout time.Duration
 
 	// The preempt interval when listening to a single partition of a topic.
-	// After this interval, the current offset will be committed to Zookeeper,
-	// and a different partition will be checked out to consume next.
+	// After this interval, a different partition will be checked out to consume next.
 	CheckoutInterval time.Duration
+
+	// How often the current offsets should be committed to Zookeeper
+	CommitInterval time.Duration
 
 	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new Client
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new Consumer
+
+	ZookeeperTimeout time.Duration // The Zookeeper timeout.
+
 }
 
+// Creates a new ConsumerGroupConfig instance with sane defaults.
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
 	return &ConsumerGroupConfig{
 		ZookeeperTimeout:    1 * time.Second,
 		CheckoutInterval:    1 * time.Second,
+		CommitInterval:      5 * time.Second,
 		KafkaClientConfig:   sarama.NewClientConfig(),
 		KafkaConsumerConfig: sarama.NewConsumerConfig(),
 	}
 }
 
+// Validates the ConsumerGroupConfig instance. It will return an error if a value
+// is set to a value that is erroneous or does not make sense
 func (cgc *ConsumerGroupConfig) Validate() error {
 	if cgc.ZookeeperTimeout <= 0 {
 		return errors.New("ZookeeperTimeout should have a duration > 0")
@@ -96,6 +101,8 @@ type ConsumerGroup struct {
 
 	checkout, force, stopper chan bool
 }
+
+type EventProcessor func(*sarama.ConsumerEvent) error
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
 func JoinConsumerGroup(name string, topic string, zookeeper []string, config *ConsumerGroupConfig) (cg *ConsumerGroup, err error) {
@@ -187,8 +194,6 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 }
 
 // Checkout applies a callback function to a single partition consumer.
-// The latest consumer offset is automatically comitted to zookeeper if successful.
-// The callback may return a DiscardCommit error to skip the commit silently.
 // Returns an error if any, but may also return a NoCheckout error to indicate
 // that no partition was available. You should add an artificial delay keep your CPU cool.
 func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error {
@@ -199,18 +204,47 @@ func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error
 		return NoCheckout
 	}
 
-	err := callback(claimed)
-	if err == DiscardCommit {
-		err = nil
-	} else if err == nil && claimed.offset > 0 {
-		sarama.Logger.Printf("Committing partition %d offset %d", claimed.partition, claimed.offset)
-		err = cg.Commit(claimed.partition, claimed.offset)
-	}
-	return err
+	return callback(claimed)
 }
 
 func (cg *ConsumerGroup) Stream() <-chan *sarama.ConsumerEvent {
 	return cg.events
+}
+
+func (cg *ConsumerGroup) commitOffsets(offsets map[int32]int64) {
+	for partition, offset := range offsets {
+		if offset > 0 {
+			sarama.Logger.Printf("Committing offset %d for partition %d", offset, partition)
+			cg.Commit(partition, offset)
+			offsets[partition] = 0
+		}
+	}
+}
+
+func (cg *ConsumerGroup) Process(processor EventProcessor) error {
+
+	offsets := make(map[int32]int64)
+	commitTimeout := time.After(cg.config.CommitInterval)
+
+	for {
+		select {
+		case event, ok := <-cg.events:
+			if ok == false {
+				cg.commitOffsets(offsets)
+				return nil
+			}
+
+			if err := processor(event); err != nil {
+				return err
+			}
+
+			offsets[event.Partition] = event.Offset
+
+		case <-commitTimeout:
+			cg.commitOffsets(offsets)
+			commitTimeout = time.After(cg.config.CommitInterval)
+		}
+	}
 }
 
 func (cg *ConsumerGroup) eventLoop() {
@@ -218,37 +252,12 @@ EventLoop:
 	for {
 		select {
 		case <-cg.stopper:
-			close(cg.events)
 			break EventLoop
 
 		default:
 			cg.Checkout(func(pc *PartitionConsumer) error {
-				sarama.Logger.Printf("Start consuming partition %d...", pc.partition)
-
-				partitionEvents := make(chan *sarama.ConsumerEvent)
-				partitionStopper := make(chan bool)
-
-				go func() {
-					if err := pc.Fetch(partitionEvents, pc.group.config.CheckoutInterval); err != nil {
-						panic(fmt.Sprintf("Fetch failed: %s", err))
-					}
-
-					close(partitionStopper)
-				}()
-
-				for {
-					select {
-					case <-partitionStopper:
-						return nil
-
-					case event, ok := <-partitionEvents:
-						if ok {
-							cg.events <- event
-						} else {
-							return errors.New("Failed to read event from channel!")
-						}
-					}
-				}
+				sarama.Logger.Printf("Checkout partition %d...", pc.partition)
+				return pc.Fetch(cg.events, cg.config.CheckoutInterval)
 			})
 		}
 
