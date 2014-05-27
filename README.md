@@ -4,7 +4,7 @@ Kafka tools and examples built on top of the sarama package.
 
 ## Packages
 
-- **consumergroup**: Load-balancing, resuming Kafka consumer, backed by Zookeeper.
+- **consumergroup**: Distributed Kafka consumer, backed by Zookeeper, supporting load balancing and offset persistence, as defined by the Kafka documentation: https://kafka.apache.org/documentation.html#distributionimpl.
 
 
 ## Examples
