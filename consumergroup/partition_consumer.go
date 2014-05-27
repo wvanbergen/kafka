@@ -45,42 +45,33 @@ type PartitionConsumer struct {
 // NewPartitionConsumer creates a new partition consumer instance
 func NewPartitionConsumer(group *ConsumerGroup, partition int32) (*PartitionConsumer, error) {
 
+	consumerConfig := *group.config.KafkaConsumerConfig
+
 	lastSeenOffset, offsetErr := group.Offset(partition)
 	if offsetErr != nil {
 		return nil, offsetErr
 	}
 
-	p := &PartitionConsumer{
-		group:     group,
-		topic:     group.topic,
-		partition: partition,
-	}
-
-	if err := p.setSaramaConsumer(*group.config.KafkaConsumerConfig, lastSeenOffset); err != nil {
-		return nil, err
-	}
-
-	return p, nil
-}
-
-func (p *PartitionConsumer) setSaramaConsumer(consumerConfig sarama.ConsumerConfig, lastSeenOffset int64) error {
-	consumerConfig.OffsetMethod = sarama.OffsetMethodOldest
-
 	if lastSeenOffset > 0 {
-		sarama.Logger.Printf("[Partition consumer] Requesting to resume partition %d from offset %d\n", p.partition, lastSeenOffset)
+		sarama.Logger.Printf("[Partition consumer] Requesting to resume partition %d from offset %d\n", partition, lastSeenOffset)
 		consumerConfig.OffsetMethod = sarama.OffsetMethodManual
 		consumerConfig.OffsetValue = lastSeenOffset + 1
 	} else {
-		sarama.Logger.Printf("[Partition consumer] No committed offset for partition %d, starting from oldest offset.", p.partition)
+		sarama.Logger.Printf("[Partition consumer] No committed offset for partition %d, starting from oldest offset.", partition)
+		consumerConfig.OffsetMethod = sarama.OffsetMethodOldest
 	}
 
-	consumer, err := sarama.NewConsumer(p.group.client, p.group.topic, p.partition, p.group.name, &consumerConfig)
+	consumer, err := sarama.NewConsumer(group.client, group.topic, partition, group.name, &consumerConfig)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	p.stream = consumer
-	return nil
+	return &PartitionConsumer{
+		group:     group,
+		topic:     group.topic,
+		partition: partition,
+		stream:    consumer,
+	}, nil
 }
 
 // Fetch returns a batch of events
@@ -97,16 +88,6 @@ func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration ti
 		case event, ok := <-events:
 			if !ok {
 				return nil
-			} else if event.Err == sarama.OffsetOutOfRange {
-				sarama.Logger.Printf("[Partition consumer] Committed offset %d for partition %d is out of range, starting with the oldest offset instead.", p.offset, p.partition)
-
-				// This is shitty and really needs reworking.
-				p.stream.Close()
-				if err := p.setSaramaConsumer(*p.group.config.KafkaConsumerConfig, 0); err != nil {
-					return err
-				}
-
-				return p.Fetch(stream, duration)
 			} else if event.Err != nil {
 				sarama.Logger.Println("[Partition consumer] ERROR:", event.Err)
 				return event.Err
