@@ -86,12 +86,14 @@ func (p *PartitionConsumer) setSaramaConsumer(lastSeenOffset int64) error {
 
 // Fetch returns a batch of events
 // WARNING: may return nil if not events are available
-func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration time.Duration) error {
+func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration time.Duration, stopper chan bool) error {
 	events := p.stream.Events()
 	timeout := time.After(duration)
 
 	for {
 		select {
+		case <-stopper:
+			return nil
 		case <-timeout:
 			return nil
 
@@ -106,13 +108,17 @@ func (p *PartitionConsumer) Fetch(stream chan *sarama.ConsumerEvent, duration ti
 					return err
 				}
 
-				return p.Fetch(stream, duration)
+				return p.Fetch(stream, duration, stopper)
 			} else if event.Err != nil {
 				sarama.Logger.Println("Fail", event.Err)
 				return event.Err
 			}
 
-			stream <- event
+			select {
+			case stream <- event:
+			case <-stopper:
+				return nil
+			}
 			if event.Err == nil && event.Offset > p.offset {
 				p.offset = event.Offset
 			}

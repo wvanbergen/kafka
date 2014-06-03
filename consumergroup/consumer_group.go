@@ -86,7 +86,7 @@ type ConsumerGroup struct {
 	client *sarama.Client
 	zoo    *ZK
 	claims []PartitionConsumer
-	wg     sync.WaitGroup
+	wg     *sync.WaitGroup
 
 	zkchange <-chan zk.Event
 	claimed  chan *PartitionConsumer
@@ -175,14 +175,16 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 		events: make(chan *sarama.ConsumerEvent),
 	}
 
+	group.wg = &sync.WaitGroup{}
+
 	// Register itself with zookeeper
 	if err = zoo.RegisterConsumer(group.name, group.id, group.topic); err != nil {
 		return nil, err
 	}
 
+	group.wg.Add(2)
 	go group.signalLoop()
 	go group.eventLoop()
-	group.wg.Add(2)
 	return group, nil
 }
 
@@ -193,7 +195,13 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 // that no partition was available. You should add an artificial delay keep your CPU cool.
 func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error {
 	cg.checkout <- true
-	claimed := <-cg.claimed
+
+	var claimed *PartitionConsumer
+	select {
+	case claimed = <-cg.claimed:
+	case <-cg.stopper:
+		return NoCheckout
+	}
 
 	if claimed == nil {
 		return NoCheckout
@@ -214,6 +222,7 @@ func (cg *ConsumerGroup) Stream() <-chan *sarama.ConsumerEvent {
 }
 
 func (cg *ConsumerGroup) eventLoop() {
+	defer cg.wg.Done()
 EventLoop:
 	for {
 		select {
@@ -229,7 +238,7 @@ EventLoop:
 				partitionStopper := make(chan bool)
 
 				go func() {
-					if err := pc.Fetch(partitionEvents, pc.group.config.CheckoutInterval); err != nil {
+					if err := pc.Fetch(partitionEvents, pc.group.config.CheckoutInterval, cg.stopper); err != nil {
 						panic(fmt.Sprintf("Fetch failed: %s", err))
 					}
 
@@ -253,7 +262,6 @@ EventLoop:
 		}
 
 	}
-	cg.wg.Done()
 }
 
 // Commit manually commits an offset for a partition
@@ -284,11 +292,17 @@ func (cg *ConsumerGroup) Close() error {
 
 // Background signal loop
 func (cg *ConsumerGroup) signalLoop() {
+	defer cg.wg.Done()
+	defer cg.releaseClaims()
 	for {
 		// If we have no zk handle, rebalance
 		if cg.zkchange == nil {
 			if err := cg.rebalance(); err != nil && cg.listener != nil {
-				cg.listener <- &Notification{Type: REBALANCE_ERROR, Src: cg, Err: err}
+				select {
+				case cg.listener <- &Notification{Type: REBALANCE_ERROR, Src: cg, Err: err}:
+				case <-cg.stopper:
+					return
+				}
 			}
 		}
 
@@ -296,7 +310,6 @@ func (cg *ConsumerGroup) signalLoop() {
 		if cg.zkchange == nil {
 			select {
 			case <-cg.stopper:
-				cg.stop()
 				return
 			case <-time.After(time.Millisecond):
 				// Continue
@@ -307,14 +320,17 @@ func (cg *ConsumerGroup) signalLoop() {
 		// If rebalance worked, wait for a stop signal or a zookeeper change or a fetch-request
 		select {
 		case <-cg.stopper:
-			cg.stop()
 			return
 		case <-cg.force:
 			cg.zkchange = nil
 		case <-cg.zkchange:
 			cg.zkchange = nil
 		case <-cg.checkout:
-			cg.claimed <- cg.nextConsumer()
+			select {
+			case cg.claimed <- cg.nextConsumer():
+			case <-cg.stopper:
+				return
+			}
 		}
 	}
 }
@@ -322,12 +338,6 @@ func (cg *ConsumerGroup) signalLoop() {
 /**********************************************************************
  * PRIVATE
  **********************************************************************/
-
-// Stops the consumer group
-func (cg *ConsumerGroup) stop() {
-	cg.releaseClaims()
-	cg.wg.Done()
-}
 
 // Checkout a claimed partition consumer
 func (cg *ConsumerGroup) nextConsumer() *PartitionConsumer {
