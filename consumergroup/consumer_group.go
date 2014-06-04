@@ -197,8 +197,7 @@ func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error
 	select {
 	case <-cg.stopper:
 		return NoCheckout
-	default:
-		cg.checkout <- true
+	case cg.checkout <- true:
 	}
 
 	var claimed *PartitionConsumer
