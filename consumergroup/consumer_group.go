@@ -194,7 +194,12 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 // Returns an error if any, but may also return a NoCheckout error to indicate
 // that no partition was available. You should add an artificial delay keep your CPU cool.
 func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error {
-	cg.checkout <- true
+	select {
+	case <-cg.stopper:
+		return NoCheckout
+	default:
+		cg.checkout <- true
+	}
 
 	var claimed *PartitionConsumer
 	select {
