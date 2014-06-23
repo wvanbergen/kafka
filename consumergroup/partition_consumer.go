@@ -65,14 +65,20 @@ func NewPartitionConsumer(group *ConsumerGroup, partition int32) (*PartitionCons
 
 func (p *PartitionConsumer) setSaramaConsumer(lastSeenOffset int64) error {
 	consumerConfig := *p.group.config.KafkaConsumerConfig
-	consumerConfig.OffsetMethod = sarama.OffsetMethodOldest
+	if consumerConfig.OffsetMethod == 0 {
+		consumerConfig.OffsetMethod = sarama.OffsetMethodOldest
+	}
 
 	if lastSeenOffset > 0 {
 		sarama.Logger.Printf("Requesting to resume from offset %d\n", lastSeenOffset)
 		consumerConfig.OffsetMethod = sarama.OffsetMethodManual
 		consumerConfig.OffsetValue = lastSeenOffset + 1
 	} else {
-		sarama.Logger.Printf("Starting from offset 0\n")
+		if consumerConfig.OffsetMethod == sarama.OffsetMethodOldest {
+			sarama.Logger.Printf("Starting from offset 0\n")
+		} else {
+			sarama.Logger.Printf("Using specified offset method\n")
+		}
 	}
 
 	consumer, err := sarama.NewConsumer(p.group.client, p.group.topic, p.partition, p.group.name, &consumerConfig)
