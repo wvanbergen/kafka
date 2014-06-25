@@ -82,10 +82,11 @@ type ConsumerGroup struct {
 
 	config *ConsumerGroupConfig
 
-	client *sarama.Client
-	zoo    *ZK
-	claims []PartitionConsumer
-	wg     *sync.WaitGroup
+	client       *sarama.Client
+	zoo          *ZK
+	claims       []PartitionConsumer
+	eventOffsets map[int32]int64
+	wg           *sync.WaitGroup
 
 	zkchange <-chan zk.Event
 	claimed  chan *PartitionConsumer
@@ -160,11 +161,12 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 		name:  name,
 		topic: topic,
 
-		config:   config,
-		client:   client,
-		zoo:      zoo,
-		claims:   make([]PartitionConsumer, 0),
-		listener: listener,
+		config:       config,
+		client:       client,
+		zoo:          zoo,
+		claims:       make([]PartitionConsumer, 0),
+		eventOffsets: make(map[int32]int64, 0),
+		listener:     listener,
 
 		stopper:  make(chan bool),
 		checkout: make(chan bool),
@@ -215,6 +217,7 @@ func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error
 		err = nil
 	} else if err == nil && claimed.offset > 0 {
 		sarama.Logger.Printf("Committing partition %d offset %d", claimed.partition, claimed.offset)
+		cg.eventOffsets[claimed.partition] = claimed.offset
 		err = cg.Commit(claimed.partition, claimed.offset)
 	}
 	return err
@@ -313,6 +316,20 @@ func (cg *ConsumerGroup) signalLoop() {
 			}
 		}
 	}
+}
+
+func (cg *ConsumerGroup) EventsBehindLatest() map[int32]int64 {
+	result := make(map[int32]int64, 0)
+	latest, _ := cg.latestOffsets()
+
+	for partition, currentOffset := range cg.eventOffsets {
+		latestOffset := latest[partition]
+		if latestOffset != 0 && currentOffset != 0 {
+			result[partition] = latestOffset - currentOffset
+		}
+	}
+
+	return result
 }
 
 /**********************************************************************
@@ -426,4 +443,17 @@ func (cg *ConsumerGroup) releaseClaims() {
 		cg.zoo.Release(cg.name, cg.topic, pc.partition, cg.id)
 	}
 	cg.claims = cg.claims[:0]
+}
+
+func (cg *ConsumerGroup) latestOffsets() (map[int32]int64, error) {
+	offsets := make(map[int32]int64)
+	for _, pc := range cg.claims {
+		currentOffset, err := cg.client.GetOffset(cg.topic, pc.partition, sarama.LatestOffsets)
+		if err != nil {
+			return nil, err
+		}
+
+		offsets[pc.partition] = currentOffset
+	}
+	return offsets, nil
 }
