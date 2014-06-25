@@ -427,3 +427,16 @@ func (cg *ConsumerGroup) releaseClaims() {
 	}
 	cg.claims = cg.claims[:0]
 }
+
+func (cg *ConsumerGroup) latestOffsets() (map[int32]int64, error) {
+	offsets := make(map[int32]int64)
+	for partition := range cg.claims {
+		currentOffset, err := cg.client.GetOffset(cg.topic, int32(partition), sarama.LatestOffsets)
+		if err != nil {
+			return nil, err
+		}
+
+		offsets[int32(partition)] = currentOffset
+	}
+	return offsets, nil
+}
