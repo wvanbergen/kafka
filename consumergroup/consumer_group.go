@@ -33,14 +33,25 @@ type ConsumerGroupConfig struct {
 
 	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new Client
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new Consumer
+
+	// The unique consumer identifier. Normally, a new unique identifier is generated,
+	// but you can set it to the same string as another ConsumerGroup's Consumer ID.
+	// Do this when you want to consume multiple topics from within your consumer group
+	ConsumerID string
 }
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
+	newConsumerID, err := generateConsumerID()
+	if err != nil {
+		panic(err)
+	}
+
 	return &ConsumerGroupConfig{
 		ZookeeperTimeout:    1 * time.Second,
 		CheckoutInterval:    1 * time.Second,
 		KafkaClientConfig:   sarama.NewClientConfig(),
 		KafkaConsumerConfig: sarama.NewConsumerConfig(),
+		ConsumerID:          newConsumerID,
 	}
 }
 
@@ -61,6 +72,10 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 		return err
 	}
 
+	if cgc.ConsumerID == "" {
+		return errors.New("ConsumerID is not set!")
+	}
+
 	return nil
 }
 
@@ -78,7 +93,7 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 // addition or removal of consumers within the same group, while the addition of broker nodes
 // and/or partition *does currently not trigger* a rebalancing cycle.
 type ConsumerGroup struct {
-	id, name, topic string
+	name, topic string
 
 	config *ConsumerGroupConfig
 
@@ -149,14 +164,7 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 		return
 	}
 
-	var consumerID string
-	consumerID, err = generateConsumerID()
-	if err != nil {
-		return
-	}
-
 	group = &ConsumerGroup{
-		id:    consumerID,
 		name:  name,
 		topic: topic,
 
@@ -177,7 +185,7 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 	group.wg = &sync.WaitGroup{}
 
 	// Register itself with zookeeper
-	if err = zoo.RegisterConsumer(group.name, group.id, group.topic); err != nil {
+	if err = zoo.RegisterConsumer(group.name, group.ConsumerID(), group.topic); err != nil {
 		return nil, err
 	}
 
@@ -241,6 +249,10 @@ EventLoop:
 		}
 
 	}
+}
+
+func (cg *ConsumerGroup) ConsumerID() string {
+	return cg.config.ConsumerID
 }
 
 // Commit manually commits an offset for a partition
@@ -380,7 +392,7 @@ func (cg *ConsumerGroup) makeClaims(cids []string, parts partitionSlice) error {
 			return err
 		}
 
-		err = cg.zoo.Claim(cg.name, cg.topic, pc.partition, cg.id)
+		err = cg.zoo.Claim(cg.name, cg.topic, pc.partition, cg.ConsumerID())
 		if err != nil {
 			return err
 		}
@@ -399,7 +411,7 @@ func (cg *ConsumerGroup) claimRange(cids []string, parts partitionSlice) partiti
 	sort.Strings(cids)
 	sort.Sort(parts)
 
-	cpos := sort.SearchStrings(cids, cg.id)
+	cpos := sort.SearchStrings(cids, cg.ConsumerID())
 	clen := len(cids)
 	plen := len(parts)
 	if cpos >= clen || cpos >= plen {
@@ -423,7 +435,7 @@ func (cg *ConsumerGroup) releaseClaims() {
 	for _, pc := range cg.claims {
 		sarama.Logger.Printf("Releasing claim for partition %d...\n", pc.partition)
 		pc.Close()
-		cg.zoo.Release(cg.name, cg.topic, pc.partition, cg.id)
+		cg.zoo.Release(cg.name, cg.topic, pc.partition, cg.ConsumerID())
 	}
 	cg.claims = cg.claims[:0]
 }
