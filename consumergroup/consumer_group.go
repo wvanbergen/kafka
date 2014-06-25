@@ -2,7 +2,6 @@ package consumergroup
 
 import (
 	"errors"
-	"fmt"
 	"math"
 	"sort"
 	"sync"
@@ -237,31 +236,7 @@ EventLoop:
 		default:
 			cg.Checkout(func(pc *PartitionConsumer) error {
 				sarama.Logger.Printf("Start consuming partition %d...", pc.partition)
-
-				partitionEvents := make(chan *sarama.ConsumerEvent)
-				partitionStopper := make(chan bool)
-
-				go func() {
-					if err := pc.Fetch(partitionEvents, pc.group.config.CheckoutInterval, cg.stopper); err != nil {
-						panic(fmt.Sprintf("Fetch failed: %s", err))
-					}
-
-					close(partitionStopper)
-				}()
-
-				for {
-					select {
-					case <-partitionStopper:
-						return nil
-
-					case event, ok := <-partitionEvents:
-						if ok {
-							cg.events <- event
-						} else {
-							return errors.New("Failed to read event from channel!")
-						}
-					}
-				}
+				return pc.Fetch(cg.events, pc.group.config.CheckoutInterval, cg.stopper)
 			})
 		}
 
@@ -289,9 +264,9 @@ func (cg *ConsumerGroup) Claims() []int32 {
 
 // Close closes the consumer group
 func (cg *ConsumerGroup) Close() error {
-	cg.zoo.Close()
 	close(cg.stopper)
 	cg.wg.Wait()
+	cg.zoo.Close()
 	return nil
 }
 
