@@ -1,3 +1,4 @@
+package consumergroup
 
 import (
 	"errors"
