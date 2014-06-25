@@ -1,4 +1,3 @@
-package consumergroup
 
 import (
 	"errors"
@@ -35,7 +34,7 @@ type ConsumerGroupConfig struct {
 	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new Client
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new Consumer
 
-	// The unique consumer group. Normally, a new unique identifier is generated,
+	// The unique consumer identifier. Normally, a new unique identifier is generated,
 	// but you can set it to the same string as another ConsumerGroup's Consumer ID.
 	// Do this when you want to consume multiple topics from within your consumer group
 	ConsumerID string
