@@ -84,7 +84,7 @@ type ConsumerGroup struct {
 
 	client *sarama.Client
 	zoo    *ZK
-	claims []PartitionConsumer
+	claims []*PartitionConsumer
 	wg     *sync.WaitGroup
 
 	zkchange <-chan zk.Event
@@ -163,7 +163,7 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 		config:   config,
 		client:   client,
 		zoo:      zoo,
-		claims:   make([]PartitionConsumer, 0),
+		claims:   make([]*PartitionConsumer, 0),
 		listener: listener,
 
 		stopper:  make(chan bool),
@@ -344,7 +344,7 @@ func (cg *ConsumerGroup) nextConsumer() *PartitionConsumer {
 
 	shift := cg.claims[0]
 	cg.claims = append(cg.claims[1:], shift)
-	return &shift
+	return shift
 }
 
 // Start a rebalance cycle
@@ -402,7 +402,7 @@ func (cg *ConsumerGroup) makeClaims(cids []string, parts partitionSlice) error {
 			return err
 		}
 
-		cg.claims = append(cg.claims, *pc)
+		cg.claims = append(cg.claims, pc)
 	}
 
 	if cg.listener != nil {
