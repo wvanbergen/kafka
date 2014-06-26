@@ -46,11 +46,16 @@ func ExampleConsumerGroup() {
 	log.Printf("Processed %d events.", eventCount)
 }
 
-func produceEvents(topic string, amount int) error {
+func saramaClient() *sarama.Client {
 	client, err := sarama.NewClient("test_helper", []string{"localhost:9092"}, nil)
 	if err != nil {
-		return err
+		panic(err)
 	}
+	return client
+}
+
+func produceEvents(t *testing.T, topic string, amount int64) error {
+	client := saramaClient()
 	defer client.Close()
 
 	producer, err := sarama.NewProducer(client, nil)
@@ -59,13 +64,13 @@ func produceEvents(topic string, amount int) error {
 	}
 	defer producer.Close()
 
-	for i := 1; i <= amount; i++ {
+	for i := int64(1); i <= amount; i++ {
 		err = producer.SendMessage(topic, nil, sarama.StringEncoder(fmt.Sprintf("testing %d", i)))
 
 		if err != nil {
 			return err
 		}
-		log.Printf("Produced message %d", i)
+		t.Logf("Produced message %d", i)
 	}
 
 	return nil
@@ -76,8 +81,32 @@ func TestIntegrationBasicUsage(t *testing.T) {
 	kafkaTopic := "single_partition"
 	zookeeper := []string{"localhost:2181"}
 
-	eventBatchSize := 100
-	go produceEvents(kafkaTopic, eventBatchSize)
+	// Retrieve the offset that Sarama will use for the next message on the topic/partition.
+	client := saramaClient()
+	nextOffset, offsetErr := client.GetOffset(kafkaTopic, 0, sarama.LatestOffsets)
+	if offsetErr != nil {
+		t.Fatal(offsetErr)
+	} else {
+		t.Logf("Next offset: %d", nextOffset)
+	}
+
+	//
+	initialOffset := nextOffset - 1
+
+	// Connect to zookeeper to commit the last seen offset.
+	// This way we should only produce events that we produce ourselves in this test.
+	zk, zkErr := NewZK(zookeeper, 1*time.Second)
+	if zkErr != nil {
+		t.Fatal(zkErr)
+	}
+	if err := zk.Commit(consumerGroupName, kafkaTopic, 0, initialOffset); err != nil {
+		t.Fatal(err)
+	}
+	zk.Close()
+
+	// Produce 100 events that we will consume
+	eventBatchSize := int64(100)
+	go produceEvents(t, kafkaTopic, eventBatchSize)
 
 	consumer, consumerErr := JoinConsumerGroup(consumerGroupName, kafkaTopic, zookeeper, nil)
 	if consumerErr != nil {
@@ -85,8 +114,7 @@ func TestIntegrationBasicUsage(t *testing.T) {
 	}
 	defer consumer.Close()
 
-	eventCount := 0
-	offsets := make(map[int32]int64)
+	var eventCount int64
 
 	stream := consumer.Stream()
 	for eventCount < eventBatchSize {
@@ -101,14 +129,17 @@ func TestIntegrationBasicUsage(t *testing.T) {
 			}
 
 			eventCount += 1
-			if offsets[event.Partition] != 0 && offsets[event.Partition] != event.Offset-1 {
-				t.Fatalf("Unexpected offset on partition %d: %d. Expected %d\n", event.Partition, event.Offset, offsets[event.Partition]+1)
+			if initialOffset+eventCount != event.Offset {
+				t.Fatalf("Unexpected offset: %d. Expected %d\n", event.Offset, initialOffset+eventCount)
 			} else {
-				log.Printf("Consumed message %d", eventCount)
+				t.Logf("Consumed message %d with offset %d", eventCount, event.Offset)
 			}
 
-			offsets[event.Partition] = event.Offset
+			expectedMessage := fmt.Sprintf("testing %d", eventCount)
+			if string(event.Value) != expectedMessage {
+				t.Fatalf("Unexpected message %d: %s / %s", eventCount, string(event.Value), expectedMessage)
+			}
 		}
 	}
-	log.Println("Bye")
+	t.Logf("Successfully read %d messages, closing!", eventBatchSize)
 }

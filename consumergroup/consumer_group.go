@@ -84,7 +84,7 @@ type ConsumerGroup struct {
 
 	client *sarama.Client
 	zoo    *ZK
-	claims []PartitionConsumer
+	claims []*PartitionConsumer
 	wg     *sync.WaitGroup
 
 	zkchange <-chan zk.Event
@@ -163,7 +163,7 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 		config:   config,
 		client:   client,
 		zoo:      zoo,
-		claims:   make([]PartitionConsumer, 0),
+		claims:   make([]*PartitionConsumer, 0),
 		listener: listener,
 
 		stopper:  make(chan bool),
@@ -315,6 +315,23 @@ func (cg *ConsumerGroup) signalLoop() {
 	}
 }
 
+func (cg *ConsumerGroup) EventsBehindLatest() (map[int32]int64, error) {
+	result := make(map[int32]int64, 0)
+	latest, offsetErr := cg.latestOffsets()
+	if offsetErr != nil {
+		return nil, offsetErr
+	}
+
+	for _, pc := range cg.claims {
+		latestOffset := latest[pc.partition]
+		if latestOffset != 0 && pc.offset != 0 {
+			result[pc.partition] = latestOffset - pc.offset
+		}
+	}
+
+	return result, nil
+}
+
 /**********************************************************************
  * PRIVATE
  **********************************************************************/
@@ -327,7 +344,7 @@ func (cg *ConsumerGroup) nextConsumer() *PartitionConsumer {
 
 	shift := cg.claims[0]
 	cg.claims = append(cg.claims[1:], shift)
-	return &shift
+	return shift
 }
 
 // Start a rebalance cycle
@@ -385,7 +402,7 @@ func (cg *ConsumerGroup) makeClaims(cids []string, parts partitionSlice) error {
 			return err
 		}
 
-		cg.claims = append(cg.claims, *pc)
+		cg.claims = append(cg.claims, pc)
 	}
 
 	if cg.listener != nil {
@@ -426,4 +443,17 @@ func (cg *ConsumerGroup) releaseClaims() {
 		cg.zoo.Release(cg.name, cg.topic, pc.partition, cg.id)
 	}
 	cg.claims = cg.claims[:0]
+}
+
+func (cg *ConsumerGroup) latestOffsets() (map[int32]int64, error) {
+	offsets := make(map[int32]int64)
+	for _, pc := range cg.claims {
+		currentOffset, err := cg.client.GetOffset(cg.topic, pc.partition, sarama.LatestOffsets)
+		if err != nil {
+			return nil, err
+		}
+
+		offsets[pc.partition] = currentOffset
+	}
+	return offsets, nil
 }
