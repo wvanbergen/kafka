@@ -9,7 +9,7 @@ import (
 )
 
 type Monitor struct {
-	consumerGroup       string
+	ConsumerGroup       string
 	zookeeperConnection *ZK
 	kafkaConnection     *sarama.Client
 }
@@ -35,7 +35,7 @@ func NewMonitor(name string, consumergroup string, zookeeper []string) (*Monitor
 	return &Monitor{
 		zookeeperConnection: zkConn,
 		kafkaConnection:     saramaClient,
-		consumerGroup:       consumergroup,
+		ConsumerGroup:       consumergroup,
 	}, nil
 }
 
@@ -56,7 +56,7 @@ func (m *Monitor) Check() (map[string]map[int32]int64, error) {
 		}
 
 		for _, partition := range partitions {
-			currentOffset, _, zkErr := m.zookeeperConnection.Get(fmt.Sprintf("/consumers/%s/offsets/%s/%d", m.consumerGroup, topic, partition))
+			currentOffset, _, zkErr := m.zookeeperConnection.Get(fmt.Sprintf("/consumers/%s/offsets/%s/%d", m.ConsumerGroup, topic, partition))
 			if zkErr != nil {
 				return nil, errors.New(fmt.Sprintf("Error getting consumer group offsets for %s/%d: %s", topic, partition, zkErr))
 			}
@@ -78,7 +78,7 @@ func (m *Monitor) Check() (map[string]map[int32]int64, error) {
 }
 
 func (m *Monitor) getTopics() ([]string, error) {
-	topics, _, zkErr := m.zookeeperConnection.Children(fmt.Sprintf("/consumers/%s/offsets", m.consumerGroup))
+	topics, _, zkErr := m.zookeeperConnection.Children(fmt.Sprintf("/consumers/%s/offsets", m.ConsumerGroup))
 	if zkErr != nil {
 		return nil, zkErr
 	}
@@ -87,7 +87,7 @@ func (m *Monitor) getTopics() ([]string, error) {
 }
 
 func (m *Monitor) getPartitions(topic string) ([]int32, error) {
-	partitions, _, zkErr := m.zookeeperConnection.Children(fmt.Sprintf("/consumers/%s/offsets/%s", m.consumerGroup, topic))
+	partitions, _, zkErr := m.zookeeperConnection.Children(fmt.Sprintf("/consumers/%s/offsets/%s", m.ConsumerGroup, topic))
 	if zkErr != nil {
 		return nil, zkErr
 	}
