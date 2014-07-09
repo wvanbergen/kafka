@@ -1,0 +1,25 @@
+package main
+
+import (
+	"log"
+
+	"github.com/wvanbergen/kafka/consumergroup"
+)
+
+func main() {
+	monitor, err := consumergroup.NewMonitor("sample_monitor", "sample_consumer", []string{"zookeeper1.local:2181", "zookeeper2.local:2181"})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	eventsBehindLatest, err := monitor.Check()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for topic, topicMap := range eventsBehindLatest {
+		for partition, eventsBehind := range topicMap {
+			log.Printf("topic=%s partition=%d events_behind=%d", topic, partition, eventsBehind)
+		}
+	}
+}

@@ -10,3 +10,4 @@ Kafka tools and examples built on top of the sarama package.
 ## Examples
 
 - **topic_consumer.go** ConsumerGroup example.
+- **monitor.go** Example app to monitior how far behind a ConsumerGroup has fallen on each topic/partition
