@@ -26,6 +26,9 @@ type ConsumerGroupConfig struct {
 	// The Zookeeper timeout
 	ZookeeperTimeout time.Duration
 
+	// Zookeeper chroot
+	ZookeeperChroot string
+
 	// The preempt interval when listening to a single partition of a topic.
 	// After this interval, the current offset will be committed to Zookeeper,
 	// and a different partition will be checked out to consume next.
@@ -112,7 +115,7 @@ func JoinConsumerGroup(name string, topic string, zookeeper []string, config *Co
 	}
 
 	var zk *ZK
-	if zk, err = NewZK(zookeeper, config.ZookeeperTimeout); err != nil {
+	if zk, err = NewZK(zookeeper, config.ZookeeperChroot, config.ZookeeperTimeout); err != nil {
 		return nil, err
 	}
 
