@@ -95,7 +95,7 @@ func TestIntegrationBasicUsage(t *testing.T) {
 
 	// Connect to zookeeper to commit the last seen offset.
 	// This way we should only produce events that we produce ourselves in this test.
-	zk, zkErr := NewZK(zookeeper, 1*time.Second)
+	zk, zkErr := NewZK(zookeeper, "", 1*time.Second)
 	if zkErr != nil {
 		t.Fatal(zkErr)
 	}
