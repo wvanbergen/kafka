@@ -23,10 +23,11 @@ const (
 )
 
 type ConsumerGroupConfig struct {
-	// The Zookeeper timeout
+	// The Zookeeper read timeout
 	ZookeeperTimeout time.Duration
 
-	// Zookeeper chroot
+	// Zookeeper chroot to use. Should not include a trailing slash.
+	// Leave this empty for to not set a chroot.
 	ZookeeperChroot string
 
 	// The preempt interval when listening to a single partition of a topic.
