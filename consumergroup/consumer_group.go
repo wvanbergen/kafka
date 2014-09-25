@@ -415,7 +415,7 @@ func (cg *ConsumerGroup) makeClaims(cids []string, parts partitionSlice) error {
 	return nil
 }
 
-// Determine the partititons dumber to claim
+// Determine the partititon numbers to claim
 func (cg *ConsumerGroup) claimRange(cids []string, parts partitionSlice) partitionSlice {
 	sort.Strings(cids)
 	sort.Sort(parts)
@@ -433,10 +433,16 @@ func (cg *ConsumerGroup) claimRange(cids []string, parts partitionSlice) partiti
 	}
 
 	last := (cpos + 1) * step
+	first := cpos * step
 	if last > plen {
 		last = plen
 	}
-	return parts[cpos*step : last]
+
+	if first > len(parts) {
+		first = len(parts)
+	}
+
+	return parts[first:last]
 }
 
 // Releases all claims
