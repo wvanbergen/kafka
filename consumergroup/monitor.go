@@ -97,7 +97,7 @@ func (m *Monitor) getTopics() ([]string, error) {
 }
 
 func (m *Monitor) getPartitions(topic string) ([]int32, error) {
-	partitions, _, err := m.zookeeperConnection.Children(fmt.Sprintf("/%s", m.zookeeperPath, topic))
+	partitions, _, err := m.zookeeperConnection.Children(fmt.Sprintf("%s/%s", m.zookeeperPath, topic))
 	if err != nil {
 		return nil, err
 	}
