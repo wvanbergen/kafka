@@ -5,12 +5,12 @@ import (
 )
 
 func ExampleConsumerGroupMonitoring() {
-	monitor, err := NewMonitor("sample_monitor", "sample_consumer", []string{"zookeeper1.local:2181", "zookeeper2.local:2181"})
+	monitor, err := NewMonitor("sample_monitor", "sample_consumer", []string{"zookeeper1.local:2181", "zookeeper2.local:2181"}, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	eventsBehindLatest, err := monitor.Check()
+	eventsBehindLatest, err := monitor.ProcessingLag()
 	if err != nil {
 		log.Fatal(err)
 	}
