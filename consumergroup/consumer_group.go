@@ -438,8 +438,8 @@ func (cg *ConsumerGroup) claimRange(cids []string, parts partitionSlice) partiti
 		last = plen
 	}
 
-	if first > len(parts) {
-		first = len(parts)
+	if first > plen {
+		first = plen
 	}
 
 	return parts[first:last]
