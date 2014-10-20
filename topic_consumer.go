@@ -17,14 +17,14 @@ const (
 )
 
 var (
-	kafkaTopic    string
 	consumerGroup string
+	kafkaTopics   []string
 	zookeeper     []string
 )
 
 func init() {
-	kafkaTopic = *flag.String("topic", DefaultKafkaTopic, "The topic to consume")
 	consumerGroup = *flag.String("group", DefaultConsumerGroup, "The name of the consumer group, used for coordination and load balancing")
+	kafkaTopicsCSV := flag.String("topics", DefaultKafkaTopic, "The comma-separated list of topics to consume")
 	zookeeperCSV := flag.String("zookeeper", "", "A comma-separated Zookeeper connection string (e.g. `zookeeper1.local:2181,zookeeper2.local:2181,zookeeper3.local:2181`)")
 
 	flag.Parse()
@@ -35,13 +35,14 @@ func init() {
 	}
 
 	zookeeper = strings.Split(*zookeeperCSV, ",")
+	kafkaTopics = strings.Split(*kafkaTopicsCSV, ",")
 
 	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags)
 }
 
 func main() {
-	log.Printf("Joining consumer group for %s...", kafkaTopic)
-	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopic, zookeeper, nil)
+	log.Printf("Joining consumer group for %s...", strings.Join(kafkaTopics, ", "))
+	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, nil)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
 	}
@@ -56,7 +57,7 @@ func main() {
 	eventCount := 0
 	offsets := make(map[int32]int64)
 
-	stream := consumer.Stream()
+	stream := consumer.Events()
 	for {
 		event, ok := <-stream
 		if !ok {
