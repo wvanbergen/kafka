@@ -5,14 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
-
-	"github.com/Shopify/sarama"
-)
-
-var (
-	clientConfig   = sarama.ClientConfig{MetadataRetries: 5, WaitForElection: 250 * time.Millisecond}
-	consumerConfig = sarama.ConsumerConfig{MaxWaitTime: 500000, DefaultFetchSize: 256 * 1024, MinFetchSize: 1024, OffsetMethod: sarama.OffsetMethodOldest}
 )
 
 // COMMON TYPES
@@ -20,29 +12,25 @@ var (
 // Partition information
 type partitionLeader struct {
 	id     int32
-	leader string
+	leader int
 }
 
 // A sortable slice of Partition structs
-type partitionSlice []partitionLeader
+type partitionLeaderSlice []partitionLeader
 
-func (s partitionSlice) Len() int {
+func (s partitionLeaderSlice) Len() int {
 	return len(s)
 }
 
-func (s partitionSlice) Less(i, j int) bool {
+func (s partitionLeaderSlice) Less(i, j int) bool {
 	if s[i].leader < s[j].leader {
 		return true
 	}
 	return s[i].id < s[j].id
 }
-func (s partitionSlice) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
-// A subscribable notification
-type Notification struct {
-	Type uint8
-	Src  *ConsumerGroup
-	Err  error
+func (s partitionLeaderSlice) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
 }
 
 func generateUUID() (string, error) {

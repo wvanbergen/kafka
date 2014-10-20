@@ -2,24 +2,12 @@ package consumergroup
 
 import (
 	"errors"
-	// "math"
-	// "sort"
+	"math"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/Shopify/sarama"
-	// "github.com/samuel/go-zookeeper/zk"
-)
-
-var (
-	DiscardCommit = errors.New("sarama: commit discarded")
-	NoCheckout    = errors.New("sarama: not checkout")
-)
-
-const (
-	REBALANCE_START uint8 = iota + 1
-	REBALANCE_OK
-	REBALANCE_ERROR
 )
 
 type ConsumerGroupConfig struct {
@@ -74,8 +62,12 @@ type ConsumerGroup struct {
 
 	wg sync.WaitGroup
 
-	events  chan *sarama.ConsumerEvent
-	stopper chan struct{}
+	events    chan *sarama.ConsumerEvent
+	stopper   chan struct{}
+	rebalance chan struct{}
+
+	brokers   map[int]string
+	consumers []string
 }
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
@@ -107,13 +99,18 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		return
 	}
 
-	var kafkaBrokers []string
-	if kafkaBrokers, err = zk.Brokers(); err != nil {
+	brokers, err := zk.Brokers()
+	if err != nil {
 		return
 	}
 
+	brokerList := make([]string, 0, len(brokers))
+	for _, broker := range brokers {
+		brokerList = append(brokerList, broker)
+	}
+
 	var client *sarama.Client
-	if client, err = sarama.NewClient(name, kafkaBrokers, config.KafkaClientConfig); err != nil {
+	if client, err = sarama.NewClient(name, brokerList, config.KafkaClientConfig); err != nil {
 		return
 	}
 
@@ -135,19 +132,18 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	}
 
 	group := &ConsumerGroup{
-		id:      consumerID,
-		name:    name,
-		config:  config,
-		client:  client,
-		zk:      zk,
-		events:  make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
-		stopper: make(chan struct{}),
+		id:        consumerID,
+		name:      name,
+		config:    config,
+		brokers:   brokers,
+		client:    client,
+		zk:        zk,
+		events:    make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
+		stopper:   make(chan struct{}),
+		rebalance: make(chan struct{}),
 	}
 
-	for _, topic := range topics {
-		group.wg.Add(1)
-		go group.topicConsumer(topic, group.events)
-	}
+	go group.topicListConsumer(topics)
 
 	return group, nil
 }
@@ -156,12 +152,14 @@ func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
 	return cg.events
 }
 
-func (cg *ConsumerGroup) Close() error {
+func (cg *ConsumerGroup) Close() (err error) {
 	defer cg.zk.Close()
 	close(cg.stopper)
 	cg.wg.Wait()
 
-	if err := cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
+	cg.client.Close()
+
+	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
 		sarama.Logger.Printf("FAILED deregistering consumer %s for group %s\n", cg.id, cg.name)
 		return err
 	} else {
@@ -169,31 +167,66 @@ func (cg *ConsumerGroup) Close() error {
 	}
 
 	close(cg.events)
-	return nil
+	return
 }
 
-func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent) (err error) {
+func (cg *ConsumerGroup) topicListConsumer(topics []string) {
+	for {
+
+		consumers, consumerChanges, err := cg.zk.Consumers(cg.name)
+		if err != nil {
+			panic(err)
+		}
+
+		cg.consumers = consumers
+		sarama.Logger.Println("Currently registered consumers:", cg.consumers)
+
+		for _, topic := range topics {
+			cg.wg.Add(1)
+			go cg.topicConsumer(topic, cg.events)
+		}
+
+		select {
+		case <-cg.stopper:
+			close(cg.rebalance)
+			return
+
+		case <-consumerChanges:
+			sarama.Logger.Printf("[%s/%s] Triggering rebalance due to consumer list change.\n", cg.name, cg.id)
+			close(cg.rebalance)
+			cg.wg.Wait()
+		}
+	}
+}
+
+func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent) {
 	defer cg.wg.Done()
 
 	sarama.Logger.Printf("[%s/%s] Started topic consumer for %s\n", cg.name, cg.id, topic)
 
 	// Fetch a list of partition IDs
-	var pids []int32
-	if pids, err = cg.client.Partitions(topic); err != nil {
-		return
+	partitions, err := cg.zk.Partitions(topic)
+	if err != nil {
+		panic(err)
 	}
 
+	sarama.Logger.Println("Partitions found", partitions)
+	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitions)
+	myPartitions := dividedPartitions[cg.id]
+	sarama.Logger.Println("My partitions found", myPartitions)
+
+	// Consume all the assigned partitions
 	var wg sync.WaitGroup
-	for _, pid := range pids {
+	for _, pid := range partitions {
 		wg.Add(1)
-		go cg.partitionConsumer(topic, pid, events, &wg)
+		go cg.partitionConsumer(topic, pid.id, events, &wg)
 	}
 
 	wg.Wait()
 	sarama.Logger.Printf("[%s/%s] Stopped topic consumer for %s\n", cg.name, cg.id, topic)
-	return nil
 }
 
+// Consumes a partition
 func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup) error {
 	defer wg.Done()
 
@@ -212,24 +245,42 @@ partitionConsumerLoop:
 		case event := <-partitionEvents:
 			// sarama.Logger.Printf("[%s/%s] Event on partition consumer for %s/%d\n", cg.name, cg.id, topic, partition)
 			events <- event
-		case <-cg.stopper:
-			sarama.Logger.Printf("[%s/%s] Stopping partition consumer for %s/%d\n", cg.name, cg.id, topic, partition)
+		case <-cg.rebalance:
 			break partitionConsumerLoop
 		}
 	}
+
+	sarama.Logger.Printf("[%s/%s] Stopping partition consumer for %s/%d\n", cg.name, cg.id, topic, partition)
 	return nil
 }
 
-// 	// Register itself with zookeeper
-// 	if err = zoo.RegisterConsumer(group.name, group.id, group.topic); err != nil {
-// 		return nil, err
-// 	}
+// Divides a set of partitions between a set of consumers.
+func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaderSlice) map[string]partitionLeaderSlice {
+	result := make(map[string]partitionLeaderSlice)
 
-// 	group.wg.Add(2)
-// 	go group.signalLoop()
-// 	go group.eventLoop()
-// 	return group, nil
-// }
+	plen := len(partitions)
+	clen := len(consumers)
+
+	sort.Sort(partitions)
+	sort.Strings(consumers)
+
+	n := int(math.Ceil(float64(plen) / float64(clen)))
+	for i, consumer := range consumers {
+		first := i * n
+		if first > plen {
+			first = plen
+		}
+
+		last := (i + 1) * n
+		if last > plen {
+			last = plen
+		}
+
+		result[consumer] = partitions[first:last]
+	}
+
+	return result
+}
 
 // // Checkout applies a callback function to a single partition consumer.
 // // The latest consumer offset is automatically comitted to zookeeper if successful.
@@ -304,14 +355,6 @@ partitionConsumerLoop:
 // 		res = append(res, claim.partition)
 // 	}
 // 	return res
-// }
-
-// // Close closes the consumer group
-// func (cg *ConsumerGroup) Close() error {
-// 	close(cg.stopper)
-// 	cg.wg.Wait()
-// 	cg.zoo.Close()
-// 	return nil
 // }
 
 // // Background signal loop

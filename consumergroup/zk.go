@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"sort"
 	"strconv"
 	"time"
+
+	"log"
 
 	"github.com/samuel/go-zookeeper/zk"
 )
@@ -30,30 +31,36 @@ func NewZK(servers []string, chroot string, recvTimeout time.Duration) (*ZK, err
  * HIGH LEVEL API
  *******************************************************************/
 
-func (z *ZK) Brokers() ([]string, error) {
+func (z *ZK) Brokers() (map[int]string, error) {
 	root := fmt.Sprintf("%s/brokers/ids", z.chroot)
-	children, _, childrenErr := z.Children(root)
-	if childrenErr != nil {
-		return nil, childrenErr
+	children, _, err := z.Children(root)
+	if err != nil {
+		return nil, err
 	}
 
-	result := make([]string, len(children))
-	for index, child := range children {
-		value, _, childErr := z.Get(path.Join(root, child))
-		if childErr != nil {
-			return nil, childErr
+	type brokerEntry struct {
+		Host string `json:host`
+		Port int    `json:port`
+	}
+
+	result := make(map[int]string)
+	for _, child := range children {
+		brokerID, err := strconv.ParseInt(child, 10, 32)
+		if err != nil {
+			return nil, err
 		}
 
-		type brokerEntry struct {
-			Host string `json:host`
-			Port int    `json:port`
+		value, _, err := z.Get(path.Join(root, child))
+		if err != nil {
+			return nil, err
 		}
+
 		var brokerNode brokerEntry
 		if err := json.Unmarshal(value, &brokerNode); err != nil {
 			return nil, err
 		}
 
-		result[index] = fmt.Sprintf("%s:%d", brokerNode.Host, brokerNode.Port)
+		result[int(brokerID)] = fmt.Sprintf("%s:%d", brokerNode.Host, brokerNode.Port)
 	}
 
 	return result, nil
@@ -71,8 +78,42 @@ func (z *ZK) Consumers(group string) ([]string, <-chan zk.Event, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	sort.Strings(strs)
 	return strs, ch, nil
+}
+
+func (z *ZK) Partitions(topic string) (partitionLeaderSlice, error) {
+	root := fmt.Sprintf("%s/brokers/topics/%s/partitions", z.chroot, topic)
+	children, _, err := z.Children(root)
+	if err != nil {
+		return nil, err
+	}
+
+	type partitionEntry struct {
+		Leader int `json:leader`
+	}
+
+	result := make(partitionLeaderSlice, 0, len(children))
+	for _, child := range children {
+		partitionNumber, err := strconv.ParseInt(child, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		value, _, err := z.Get(path.Join(root, child, "state"))
+		if err != nil {
+			return nil, err
+		}
+
+		log.Println(string(value))
+		var partitionNode partitionEntry
+		if err := json.Unmarshal(value, &partitionNode); err != nil {
+			return nil, err
+		}
+
+		result = append(result, partitionLeader{id: int32(partitionNumber), leader: partitionNode.Leader})
+	}
+
+	return result, nil
 }
 
 // Claim claims a topic/partition ownership for a consumer ID within a group
