@@ -12,10 +12,10 @@ func Test_PartitionDivision(t *testing.T) {
 	}
 
 	partitions := partitionLeaderSlice{
-		partitionLeader{id: 0, leader: "broker1"},
-		partitionLeader{id: 1, leader: "broker2"},
-		partitionLeader{id: 2, leader: "broker1"},
-		partitionLeader{id: 3, leader: "broker2"},
+		partitionLeader{id: 0, leader: 1},
+		partitionLeader{id: 1, leader: 2},
+		partitionLeader{id: 2, leader: 1},
+		partitionLeader{id: 3, leader: 2},
 	}
 
 	division := dividePartitionsBetweenConsumers(consumers, partitions)
