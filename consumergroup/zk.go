@@ -153,10 +153,15 @@ func (z *ZK) RegisterGroup(group string) error {
 }
 
 // CreateConsumer registers a new consumer within a group
-func (z *ZK) RegisterConsumer(group, id, topic string) error {
+func (z *ZK) RegisterConsumer(group, id string, topics []string) error {
+	subscription := make(map[string]int)
+	for _, topic := range topics {
+		subscription[topic] = 1
+	}
+
 	data, err := json.Marshal(map[string]interface{}{
 		"pattern":      "white_list",
-		"subscription": map[string]int{topic: 1},
+		"subscription": subscription,
 		"timestamp":    fmt.Sprintf("%d", time.Now().Unix()),
 		"version":      1,
 	})
@@ -165,6 +170,10 @@ func (z *ZK) RegisterConsumer(group, id, topic string) error {
 	}
 
 	return z.Create(fmt.Sprintf("%s/consumers/%s/ids/%s", z.chroot, group, id), data, true)
+}
+
+func (z *ZK) DeregisterConsumer(group, id string) error {
+	return z.Delete(fmt.Sprintf("%s/consumers/%s/ids/%s", z.chroot, group, id), 0)
 }
 
 /*******************************************************************

@@ -51,7 +51,9 @@ func main() {
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		<-c
-		consumer.Close()
+		if err := consumer.Close(); err != nil {
+			sarama.Logger.Println("Error closing the consumer", err)
+		}
 	}()
 
 	eventCount := 0

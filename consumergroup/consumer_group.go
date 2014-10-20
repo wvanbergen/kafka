@@ -99,12 +99,12 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 	// Validate configuration
 	if err = config.Validate(); err != nil {
-		return nil, err
+		return
 	}
 
 	var zk *ZK
 	if zk, err = NewZK(zookeeper, config.ZookeeperChroot, config.ZookeeperTimeout); err != nil {
-		return nil, err
+		return
 	}
 
 	var kafkaBrokers []string
@@ -117,14 +117,20 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		return
 	}
 
+	var consumerID string
+	consumerID, err = generateConsumerID()
+	if err != nil {
+		return
+	}
+
 	// Register consumer group
 	if err = zk.RegisterGroup(name); err != nil {
 		return
 	}
 
-	var consumerID string
-	consumerID, err = generateConsumerID()
-	if err != nil {
+	// Register itself with zookeeper
+	sarama.Logger.Printf("Registering consumer %s for group %s\n", consumerID, name)
+	if err = zk.RegisterConsumer(name, consumerID, topics); err != nil {
 		return
 	}
 
@@ -138,8 +144,8 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		stopper: make(chan struct{}),
 	}
 
-	group.wg.Add(len(topics))
 	for _, topic := range topics {
+		group.wg.Add(1)
 		go group.topicConsumer(topic, group.events)
 	}
 
@@ -151,8 +157,16 @@ func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
 }
 
 func (cg *ConsumerGroup) Close() error {
+	defer cg.zk.Close()
 	close(cg.stopper)
 	cg.wg.Wait()
+
+	if err := cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
+		sarama.Logger.Printf("FAILED deregistering consumer %s for group %s\n", cg.id, cg.name)
+		return err
+	} else {
+		sarama.Logger.Printf("Deregistering consumer %s for group %s\n", cg.id, cg.name)
+	}
 
 	close(cg.events)
 	return nil
@@ -205,33 +219,6 @@ partitionConsumerLoop:
 	}
 	return nil
 }
-
-// NewConsumerGroup creates a new consumer group for a given topic.
-//
-// You MUST call Close() on a consumer to avoid leaks, it will not be garbage-collected automatically when
-// it passes out of scope (this is in addition to calling Close on the underlying client, which is still necessary).
-// func startConsumerGroup(client *sarama.Client, zoo *ZK, name string, topics []string, config *ConsumerGroupConfig) (group *ConsumerGroup, err error) {
-
-// 	group = &ConsumerGroup{
-// 		id:    consumerID,
-// 		name:  name,
-// 		topic: topic,
-
-// 		config:   config,
-// 		client:   client,
-// 		zoo:      zoo,
-// 		claims:   make([]*PartitionConsumer, 0),
-// 		listener: listener,
-
-// 		stopper:  make(chan bool),
-// 		checkout: make(chan bool),
-// 		force:    make(chan bool),
-// 		claimed:  make(chan *PartitionConsumer),
-
-// 		events: make(chan *sarama.ConsumerEvent),
-// 	}
-
-// 	group.wg = &sync.WaitGroup{}
 
 // 	// Register itself with zookeeper
 // 	if err = zoo.RegisterConsumer(group.name, group.id, group.topic); err != nil {
