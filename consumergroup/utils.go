@@ -4,10 +4,38 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"sort"
 )
 
-// COMMON TYPES
+// Divides a set of partitions between a set of consumers.
+func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaderSlice) map[string]partitionLeaderSlice {
+	result := make(map[string]partitionLeaderSlice)
+
+	plen := len(partitions)
+	clen := len(consumers)
+
+	sort.Sort(partitions)
+	sort.Strings(consumers)
+
+	n := int(math.Ceil(float64(plen) / float64(clen)))
+	for i, consumer := range consumers {
+		first := i * n
+		if first > plen {
+			first = plen
+		}
+
+		last := (i + 1) * n
+		if last > plen {
+			last = plen
+		}
+
+		result[consumer] = partitions[first:last]
+	}
+
+	return result
+}
 
 // Partition information
 type partitionLeader struct {
