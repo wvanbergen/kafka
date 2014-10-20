@@ -62,9 +62,8 @@ type ConsumerGroup struct {
 
 	wg sync.WaitGroup
 
-	events    chan *sarama.ConsumerEvent
-	stopper   chan struct{}
-	rebalance chan struct{}
+	events  chan *sarama.ConsumerEvent
+	stopper chan struct{}
 
 	brokers   map[int]string
 	consumers []string
@@ -132,15 +131,14 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	}
 
 	group := &ConsumerGroup{
-		id:        consumerID,
-		name:      name,
-		config:    config,
-		brokers:   brokers,
-		client:    client,
-		zk:        zk,
-		events:    make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
-		stopper:   make(chan struct{}),
-		rebalance: make(chan struct{}),
+		id:      consumerID,
+		name:    name,
+		config:  config,
+		brokers: brokers,
+		client:  client,
+		zk:      zk,
+		events:  make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
+		stopper: make(chan struct{}),
 	}
 
 	go group.topicListConsumer(topics)
@@ -181,25 +179,27 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 		cg.consumers = consumers
 		sarama.Logger.Println("Currently registered consumers:", cg.consumers)
 
+		stopper := make(chan struct{})
+
 		for _, topic := range topics {
 			cg.wg.Add(1)
-			go cg.topicConsumer(topic, cg.events)
+			go cg.topicConsumer(topic, cg.events, stopper)
 		}
 
 		select {
 		case <-cg.stopper:
-			close(cg.rebalance)
+			close(stopper)
 			return
 
 		case <-consumerChanges:
 			sarama.Logger.Printf("[%s/%s] Triggering rebalance due to consumer list change.\n", cg.name, cg.id)
-			close(cg.rebalance)
+			close(stopper)
 			cg.wg.Wait()
 		}
 	}
 }
 
-func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent) {
+func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent, stopper <-chan struct{}) {
 	defer cg.wg.Done()
 
 	sarama.Logger.Printf("[%s/%s] Started topic consumer for %s\n", cg.name, cg.id, topic)
@@ -210,16 +210,15 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 		panic(err)
 	}
 
-	sarama.Logger.Println("Partitions found", partitions)
 	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitions)
 	myPartitions := dividedPartitions[cg.id]
-	sarama.Logger.Println("My partitions found", myPartitions)
+	sarama.Logger.Printf("Topic %s has %d partitions in total, claiming %d", topic, len(partitions), len(myPartitions))
 
 	// Consume all the assigned partitions
 	var wg sync.WaitGroup
-	for _, pid := range partitions {
+	for _, pid := range myPartitions {
 		wg.Add(1)
-		go cg.partitionConsumer(topic, pid.id, events, &wg)
+		go cg.partitionConsumer(topic, pid.id, events, &wg, stopper)
 	}
 
 	wg.Wait()
@@ -227,7 +226,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 }
 
 // Consumes a partition
-func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup) error {
+func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup, stopper <-chan struct{}) error {
 	defer wg.Done()
 
 	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, cg.config.KafkaConsumerConfig)
@@ -245,7 +244,7 @@ partitionConsumerLoop:
 		case event := <-partitionEvents:
 			// sarama.Logger.Printf("[%s/%s] Event on partition consumer for %s/%d\n", cg.name, cg.id, topic, partition)
 			events <- event
-		case <-cg.rebalance:
+		case <-stopper:
 			break partitionConsumerLoop
 		}
 	}
