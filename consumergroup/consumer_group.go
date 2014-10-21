@@ -13,14 +13,14 @@ type ConsumerGroupConfig struct {
 	ZookeeperTimeout time.Duration
 
 	// Zookeeper chroot to use. Should not include a trailing slash.
-	// Leave this empty for to not set a chroot.
+	// Leave this empty when your Kafka install does not use a chroot.
 	ZookeeperChroot string
 
 	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new sarama.Client
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new sarama.Consumer
 
-	ChannelBufferSize int
-	CommitInterval    time.Duration
+	ChannelBufferSize int           // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering.
+	CommitInterval    time.Duration // The interval between which the prossed offsets are commited to Zookeeper.
 }
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
@@ -28,7 +28,7 @@ func NewConsumerGroupConfig() *ConsumerGroupConfig {
 		ZookeeperTimeout:    1 * time.Second,
 		KafkaClientConfig:   sarama.NewClientConfig(),
 		KafkaConsumerConfig: sarama.NewConsumerConfig(),
-		ChannelBufferSize:   10,
+		ChannelBufferSize:   16,
 		CommitInterval:      10 * time.Second,
 	}
 }
@@ -36,6 +36,14 @@ func NewConsumerGroupConfig() *ConsumerGroupConfig {
 func (cgc *ConsumerGroupConfig) Validate() error {
 	if cgc.ZookeeperTimeout <= 0 {
 		return errors.New("ZookeeperTimeout should have a duration > 0")
+	}
+
+	if cgc.CommitInterval <= 0 {
+		return errors.New("CommitInterval should have a duration > 0")
+	}
+
+	if cgc.ChannelBufferSize < 0 {
+		return errors.New("ChannelBufferSize should be >= 0.")
 	}
 
 	if cgc.KafkaClientConfig == nil {
@@ -53,6 +61,8 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 	return nil
 }
 
+// The ConsumerGroup type holds all the information for a consumer that is part
+// of a consumer group. Call JoinConsumerGroup to start a consumer.
 type ConsumerGroup struct {
 	id, name string
 
@@ -151,6 +161,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	return group, nil
 }
 
+// Returns a channel that you can read to obtain events from Kafka to process.
 func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
 	return cg.events
 }
@@ -268,6 +279,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 
 	partitionEvents := consumer.Events()
 	commitInterval := time.After(cg.config.CommitInterval)
+
 partitionConsumerLoop:
 	for {
 		select {
