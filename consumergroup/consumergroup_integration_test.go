@@ -11,11 +11,18 @@ import (
 	"github.com/Shopify/sarama"
 )
 
-func ExampleConsumerGroup() {
-	consumerGroupName := "my_consumer_group_name"
-	kafkaTopics := []string{"my_topic"}
-	zookeeper := []string{"localhost:2181"}
+var (
+	consumerGroupName      string
+	zookeeper, kafkaTopics []string
+)
 
+func init() {
+	consumerGroupName = "integration_test"
+	zookeeper = []string{"localhost:2181"}
+	kafkaTopics = []string{"single_partition", "multi_partition"}
+}
+
+func ExampleConsumerGroup() {
 	consumer, consumerErr := JoinConsumerGroup(consumerGroupName, kafkaTopics, zookeeper, nil)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
@@ -76,22 +83,9 @@ func produceEvents(t *testing.T, topic string, amount int64) error {
 	return nil
 }
 
-func TestIntegrationBasicUsage(t *testing.T) {
-	consumerGroupName := "integration_test"
-	kafkaTopic := "single_partition"
-	zookeeper := []string{"localhost:2181"}
-
-	// Retrieve the offset that Sarama will use for the next message on the topic/partition.
+func setupZookeeper(t *testing.T, topic string, partitions int32) {
 	client := saramaClient()
-	nextOffset, offsetErr := client.GetOffset(kafkaTopic, 0, sarama.LatestOffsets)
-	if offsetErr != nil {
-		t.Fatal(offsetErr)
-	} else {
-		t.Logf("Next offset: %d", nextOffset)
-	}
-
-	//
-	initialOffset := nextOffset - 1
+	defer client.Close()
 
 	// Connect to zookeeper to commit the last seen offset.
 	// This way we should only produce events that we produce ourselves in this test.
@@ -99,25 +93,43 @@ func TestIntegrationBasicUsage(t *testing.T) {
 	if zkErr != nil {
 		t.Fatal(zkErr)
 	}
-	if err := zk.Commit(consumerGroupName, kafkaTopic, 0, initialOffset); err != nil {
-		t.Fatal(err)
+	defer zk.Close()
+
+	for partition := int32(0); partition < partitions; partitions++ {
+		// Retrieve the offset that Sarama will use for the next message on the topic/partition.
+		nextOffset, offsetErr := client.GetOffset(topic, partition, sarama.LatestOffsets)
+		if offsetErr != nil {
+			t.Fatal(offsetErr)
+		} else {
+			t.Logf("Next offset for %s:%d = %d", topic, partition, nextOffset)
+		}
+
+		initialOffset := nextOffset - 1
+
+		if err := zk.Commit(consumerGroupName, topic, partition, initialOffset); err != nil {
+			t.Fatal(err)
+		}
 	}
-	zk.Close()
+}
+
+func TestIntegrationBasicUsage(t *testing.T) {
+	setupZookeeper(t, "single_partition", 1)
+	setupZookeeper(t, "multi_partition", 2)
 
 	// Produce 100 events that we will consume
-	eventBatchSize := int64(100)
-	go produceEvents(t, kafkaTopic, eventBatchSize)
+	go produceEvents(t, "single_partition", 100)
+	go produceEvents(t, "multi_partition", 200)
 
-	consumer, consumerErr := JoinConsumerGroup(consumerGroupName, []string{kafkaTopic}, zookeeper, nil)
-	if consumerErr != nil {
-		t.Fatal(consumerErr)
+	consumer, err := JoinConsumerGroup(consumerGroupName, kafkaTopics, zookeeper, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
 	defer consumer.Close()
 
 	var eventCount int64
 
 	events := consumer.Events()
-	for eventCount < eventBatchSize {
+	for eventCount < 300 {
 		select {
 		case <-time.After(10 * time.Second):
 			t.Fatal("Reader timeout")
@@ -126,20 +138,13 @@ func TestIntegrationBasicUsage(t *testing.T) {
 
 			if !ok {
 				t.Fatal("Event stream closed prematurely")
+			} else if event.Err != nil {
+				t.Fatal(err)
 			}
 
+			t.Logf("Topic: %s, partition: %d, offset %d", event.Topic, event.Partition, event.Offset)
 			eventCount += 1
-			if initialOffset+eventCount != event.Offset {
-				t.Fatalf("Unexpected offset: %d. Expected %d\n", event.Offset, initialOffset+eventCount)
-			} else {
-				t.Logf("Consumed message %d with offset %d", eventCount, event.Offset)
-			}
-
-			expectedMessage := fmt.Sprintf("testing %d", eventCount)
-			if string(event.Value) != expectedMessage {
-				t.Fatalf("Unexpected message %d: %s / %s", eventCount, string(event.Value), expectedMessage)
-			}
 		}
 	}
-	t.Logf("Successfully read %d messages, closing!", eventBatchSize)
+	t.Logf("Successfully read %d messages, closing!", eventCount)
 }
