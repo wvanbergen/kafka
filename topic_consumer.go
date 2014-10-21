@@ -41,7 +41,6 @@ func init() {
 }
 
 func main() {
-	log.Printf("Joining consumer group for %s...", strings.Join(kafkaTopics, ", "))
 	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, nil)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
@@ -57,7 +56,7 @@ func main() {
 	}()
 
 	eventCount := 0
-	offsets := make(map[int32]int64)
+	offsets := make(map[string]map[int32]int64)
 
 	stream := consumer.Events()
 	for {
@@ -66,12 +65,16 @@ func main() {
 			break
 		}
 
-		eventCount += 1
-		if offsets[event.Partition] != 0 && offsets[event.Partition] != event.Offset-1 {
-			log.Printf("Unexpected offset on partition %d: %d. Expected %d\n", event.Partition, event.Offset, offsets[event.Partition]+1)
+		if offsets[event.Topic] == nil {
+			offsets[event.Topic] = make(map[int32]int64)
 		}
 
-		offsets[event.Partition] = event.Offset
+		eventCount += 1
+		if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition] != event.Offset-1 {
+			log.Printf("Unexpected offset on partition %d: %d. Expected %d\n", event.Partition, event.Offset, offsets[event.Topic][event.Partition]+1)
+		}
+
+		offsets[event.Topic][event.Partition] = event.Offset
 	}
 
 	log.Printf("Processed %d events.", eventCount)
