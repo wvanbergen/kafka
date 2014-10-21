@@ -17,7 +17,7 @@ var (
 )
 
 func init() {
-	consumerGroupName = "integration_test"
+	consumerGroupName = "integration_test.single"
 	zookeeper = []string{"localhost:2181"}
 	kafkaTopics = []string{"single_partition", "multi_partition"}
 }
@@ -147,4 +147,66 @@ func TestIntegrationBasicUsage(t *testing.T) {
 		}
 	}
 	t.Logf("Successfully read %d messages, closing!", eventCount)
+}
+
+func TestIntegrationMultipleConsumers(t *testing.T) {
+	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags)
+
+	setupZookeeper(t, "multi_partition", 2)
+	go produceEvents(t, "multi_partition", 200)
+
+	consumer1, err := JoinConsumerGroup(consumerGroupName, []string{"multi_partition"}, zookeeper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer1.Close()
+
+	consumer2, err := JoinConsumerGroup(consumerGroupName, []string{"multi_partition"}, zookeeper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer2.Close()
+
+	var eventCount1, eventCount2 int64
+	offsets := make(map[int32]int64)
+
+	events1 := consumer1.Events()
+	events2 := consumer2.Events()
+
+	handleEvent := func(event *sarama.ConsumerEvent, ok bool) {
+		if !ok {
+			t.Fatal("Event stream closed prematurely")
+		} else if event.Err != nil {
+			t.Fatal(err)
+		}
+
+		if offsets[event.Partition] != 0 && offsets[event.Partition]+1 != event.Offset {
+			t.Fatalf("Unecpected offset on partition %d. Expected %d, got %d.", event.Partition, offsets[event.Partition]+1, event.Offset)
+		}
+
+		offsets[event.Partition] = event.Offset
+		t.Logf("Topic: %s, partition: %d, offset %d", event.Topic, event.Partition, event.Offset)
+	}
+
+	for eventCount1+eventCount2 < 200 {
+		select {
+		case <-time.After(10 * time.Second):
+			t.Fatal("Reader timeout")
+
+		case event1, ok1 := <-events1:
+			handleEvent(event1, ok1)
+			eventCount1 += 1
+
+		case event2, ok2 := <-events2:
+			handleEvent(event2, ok2)
+			eventCount2 += 2
+		}
+	}
+
+	if eventCount1 == 0 || eventCount2 == 0 {
+		t.Error("Expected events to be consumed by both consumers!")
+	} else {
+		t.Logf("Successfully read %d and %d messages, closing!", eventCount1, eventCount2)
+	}
+
 }
