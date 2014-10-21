@@ -41,9 +41,29 @@ func init() {
 }
 
 func main() {
-	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, nil)
-	if consumerErr != nil {
-		log.Fatalln(consumerErr)
+	eventCount := 0
+	offsets := make(map[string]map[int32]int64)
+
+	handler := func(event *sarama.ConsumerEvent) error {
+		eventCount += 1
+
+		if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition] != event.Offset-1 {
+			log.Printf("Unexpected offset on %s:%d. Expected %d, found %d, diff %d.\n", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset, event.Offset-offsets[event.Topic][event.Partition]+1)
+		}
+
+		offsets[event.Topic][event.Partition] = event.Offset
+		return nil
+	}
+
+	subscriptions := make(consumergroup.TopicSubscriptions)
+	for _, topic := range kafkaTopics {
+		offsets[topic] = make(map[int32]int64)
+		subscriptions[topic] = handler
+	}
+
+	consumer, err := consumergroup.JoinConsumerGroup(consumerGroup, zookeeper, subscriptions, nil)
+	if err != nil {
+		log.Fatalln(err)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -51,31 +71,11 @@ func main() {
 	go func() {
 		<-c
 		if err := consumer.Close(); err != nil {
-			sarama.Logger.Println("Error closing the consumer", err)
+			log.Println("Error closing the consumer", err)
 		}
 	}()
 
-	eventCount := 0
-	offsets := make(map[string]map[int32]int64)
-
-	stream := consumer.Events()
-	for {
-		event, ok := <-stream
-		if !ok {
-			break
-		}
-
-		if offsets[event.Topic] == nil {
-			offsets[event.Topic] = make(map[int32]int64)
-		}
-
-		eventCount += 1
-		if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition] != event.Offset-1 {
-			log.Printf("Unexpected offset on %s:%d. Expected %d, found %d, diff %d.\n", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset, event.Offset-offsets[event.Topic][event.Partition]+1)
-		}
-
-		offsets[event.Topic][event.Partition] = event.Offset
-	}
+	consumer.Process()
 
 	log.Printf("Processed %d events.", eventCount)
 }

@@ -19,8 +19,7 @@ type ConsumerGroupConfig struct {
 	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new sarama.Client
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new sarama.Consumer
 
-	ChannelBufferSize int
-	CommitInterval    time.Duration
+	CommitInterval time.Duration
 }
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
@@ -28,7 +27,6 @@ func NewConsumerGroupConfig() *ConsumerGroupConfig {
 		ZookeeperTimeout:    1 * time.Second,
 		KafkaClientConfig:   sarama.NewClientConfig(),
 		KafkaConsumerConfig: sarama.NewConsumerConfig(),
-		ChannelBufferSize:   10,
 		CommitInterval:      10 * time.Second,
 	}
 }
@@ -63,27 +61,30 @@ type ConsumerGroup struct {
 
 	wg sync.WaitGroup
 
-	events  chan *sarama.ConsumerEvent
-	stopper chan struct{}
+	subscriptions TopicSubscriptions
+	stopper       chan struct{}
 
 	brokers   map[int]string
 	consumers []string
 	offsets   map[string]map[int32]int64
 }
 
+type MessageHandler func(*sarama.ConsumerEvent) error
+type TopicSubscriptions map[string]MessageHandler
+
 // Connects to a consumer group, using Zookeeper for auto-discovery
-func JoinConsumerGroup(name string, topics []string, zookeeper []string, config *ConsumerGroupConfig) (cg *ConsumerGroup, err error) {
+func JoinConsumerGroup(name string, zookeeper []string, topicSubscriptions TopicSubscriptions, config *ConsumerGroupConfig) (cg *ConsumerGroup, err error) {
 
 	if name == "" {
-		return nil, sarama.ConfigurationError("Empty consumergroup name")
-	}
-
-	if len(topics) == 0 {
-		return nil, sarama.ConfigurationError("No topics provided")
+		return nil, sarama.ConfigurationError("Empty consumergroup name.")
 	}
 
 	if len(zookeeper) == 0 {
 		return nil, errors.New("You need to provide at least one zookeeper node address!")
+	}
+
+	if topicSubscriptions == nil || len(topicSubscriptions) == 0 {
+		return nil, sarama.ConfigurationError("No topics to subscribe to.")
 	}
 
 	if config == nil {
@@ -126,54 +127,46 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		return
 	}
 
-	// Register itself with zookeeper
-	if err = zk.RegisterConsumer(name, consumerID, topics); err != nil {
-		sarama.Logger.Printf("[%s] FAILED to register consumer %s!\n", name, consumerID)
-		return
-	} else {
-		sarama.Logger.Printf("[%s] Registered consumer %s.\n", name, consumerID)
-	}
-
 	group := &ConsumerGroup{
-		id:      consumerID,
-		name:    name,
-		config:  config,
-		brokers: brokers,
-		client:  client,
-		zk:      zk,
-		events:  make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
-		stopper: make(chan struct{}),
-		offsets: make(map[string]map[int32]int64),
+		id:            consumerID,
+		name:          name,
+		config:        config,
+		brokers:       brokers,
+		client:        client,
+		zk:            zk,
+		subscriptions: topicSubscriptions,
+		stopper:       make(chan struct{}),
+		offsets:       make(map[string]map[int32]int64),
 	}
-
-	go group.topicListConsumer(topics)
 
 	return group, nil
 }
 
-func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
-	return cg.events
+func (cg *ConsumerGroup) Close() (err error) {
+	close(cg.stopper)
+	return nil
 }
 
-func (cg *ConsumerGroup) Close() (err error) {
+func (cg *ConsumerGroup) Process() {
+	defer cg.client.Close()
 	defer cg.zk.Close()
-	close(cg.stopper)
-	cg.wg.Wait()
 
-	cg.client.Close()
-
-	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
-		sarama.Logger.Printf("[%s] FAILED deregistering consumer %s!\n", cg.name, cg.id)
-		return err
+	// Register itself with zookeeper
+	if err := cg.zk.RegisterConsumer(cg.name, cg.id, cg.subscriptions); err != nil {
+		sarama.Logger.Printf("[%s] FAILED to register consumer %s!\n", cg.name, cg.id)
+		return
 	} else {
-		sarama.Logger.Printf("[%s] Deregistered consumer %s.\n", cg.name, cg.id)
+		sarama.Logger.Printf("[%s] Registered consumer %s.\n", cg.name, cg.id)
 	}
 
-	close(cg.events)
-	return
-}
+	defer func() {
+		if err := cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
+			sarama.Logger.Printf("[%s] FAILED deregistering consumer %s!\n", cg.name, cg.id)
+		} else {
+			sarama.Logger.Printf("[%s] Deregistered consumer %s.\n", cg.name, cg.id)
+		}
+	}()
 
-func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 	for {
 
 		consumers, consumerChanges, err := cg.zk.Consumers(cg.name)
@@ -186,14 +179,15 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 
 		stopper := make(chan struct{})
 
-		for _, topic := range topics {
+		for topic, handler := range cg.subscriptions {
 			cg.wg.Add(1)
-			go cg.topicConsumer(topic, cg.events, stopper)
+			go cg.topicConsumer(topic, handler, stopper)
 		}
 
 		select {
 		case <-cg.stopper:
 			close(stopper)
+			cg.wg.Wait()
 			return
 
 		case <-consumerChanges:
@@ -204,7 +198,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 	}
 }
 
-func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent, stopper <-chan struct{}) {
+func (cg *ConsumerGroup) topicConsumer(topic string, handler MessageHandler, stopper <-chan struct{}) {
 	defer cg.wg.Done()
 
 	sarama.Logger.Printf("[%s] Started topic consumer for %s\n", cg.name, topic)
@@ -224,7 +218,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 	for _, pid := range myPartitions {
 
 		wg.Add(1)
-		go cg.partitionConsumer(topic, pid.id, events, &wg, stopper)
+		go cg.partitionConsumer(topic, pid.id, handler, &wg, stopper)
 	}
 
 	wg.Wait()
@@ -232,7 +226,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 }
 
 // Consumes a partition
-func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup, stopper <-chan struct{}) {
+func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, handler MessageHandler, wg *sync.WaitGroup, stopper <-chan struct{}) {
 	defer wg.Done()
 
 	err := cg.zk.Claim(cg.name, topic, partition, cg.id)
@@ -263,6 +257,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 
 	partitionEvents := consumer.Events()
 	commitInterval := time.After(cg.config.CommitInterval)
+
 partitionConsumerLoop:
 	for {
 		select {
@@ -271,8 +266,10 @@ partitionConsumerLoop:
 				panic(event.Err)
 			}
 
+			if err := handler(event); err != nil {
+				panic(err)
+			}
 			lastOffset = event.Offset
-			events <- event
 
 		case <-commitInterval:
 			if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
