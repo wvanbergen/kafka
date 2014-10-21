@@ -123,9 +123,11 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	}
 
 	// Register itself with zookeeper
-	sarama.Logger.Printf("Registering consumer %s for group %s\n", consumerID, name)
 	if err = zk.RegisterConsumer(name, consumerID, topics); err != nil {
+		sarama.Logger.Printf("[%s] FAILED to register consumer %s!\n", name, consumerID)
 		return
+	} else {
+		sarama.Logger.Printf("[%s] Registered consumer %s.\n", name, consumerID)
 	}
 
 	group := &ConsumerGroup{
@@ -156,10 +158,10 @@ func (cg *ConsumerGroup) Close() (err error) {
 	cg.client.Close()
 
 	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
-		sarama.Logger.Printf("FAILED deregistering consumer %s for group %s\n", cg.id, cg.name)
+		sarama.Logger.Printf("[%s] FAILED deregistering consumer %s!\n", cg.name, cg.id)
 		return err
 	} else {
-		sarama.Logger.Printf("Deregistering consumer %s for group %s\n", cg.id, cg.name)
+		sarama.Logger.Printf("[%s] Deregistered consumer %s.\n", cg.name, cg.id)
 	}
 
 	close(cg.events)
@@ -175,7 +177,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 		}
 
 		cg.consumers = consumers
-		sarama.Logger.Println("Currently registered consumers:", cg.consumers)
+		sarama.Logger.Printf("[%s] Currently registered consumers: %d\n", cg.name, len(cg.consumers))
 
 		stopper := make(chan struct{})
 
@@ -190,7 +192,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 			return
 
 		case <-consumerChanges:
-			sarama.Logger.Printf("[%s/%s] Triggering rebalance due to consumer list change.\n", cg.name, cg.id)
+			sarama.Logger.Printf("[%s] Triggering rebalance due to consumer list change.\n", cg.name)
 			close(stopper)
 			cg.wg.Wait()
 		}
@@ -200,7 +202,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent, stopper <-chan struct{}) {
 	defer cg.wg.Done()
 
-	sarama.Logger.Printf("[%s/%s] Started topic consumer for %s\n", cg.name, cg.id, topic)
+	sarama.Logger.Printf("[%s] Started topic consumer for %s\n", cg.name, topic)
 
 	// Fetch a list of partition IDs
 	partitions, err := cg.zk.Partitions(topic)
@@ -210,7 +212,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 
 	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitions)
 	myPartitions := dividedPartitions[cg.id]
-	sarama.Logger.Printf("Topic %s has %d partitions in total, claiming %d", topic, len(partitions), len(myPartitions))
+	sarama.Logger.Printf("[%s] Claiming %d of %d partitions for topic %s.", cg.name, len(myPartitions), len(partitions), topic)
 
 	// Consume all the assigned partitions
 	var wg sync.WaitGroup
@@ -221,7 +223,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 	}
 
 	wg.Wait()
-	sarama.Logger.Printf("[%s/%s] Stopped topic consumer for %s\n", cg.name, cg.id, topic)
+	sarama.Logger.Printf("[%s] Stopped topic consumer for %s\n", cg.name, topic)
 }
 
 // Consumes a partition
@@ -240,19 +242,18 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	}
 	defer consumer.Close()
 
-	sarama.Logger.Printf("[%s/%s] Started partition consumer for %s/%d\n", cg.name, cg.id, topic, partition)
+	sarama.Logger.Printf("[%s] Started partition consumer for %s:%d\n", cg.name, topic, partition)
 
 	partitionEvents := consumer.Events()
 partitionConsumerLoop:
 	for {
 		select {
 		case event := <-partitionEvents:
-			// sarama.Logger.Printf("[%s/%s] Event on partition consumer for %s/%d\n", cg.name, cg.id, topic, partition)
 			events <- event
 		case <-stopper:
 			break partitionConsumerLoop
 		}
 	}
 
-	sarama.Logger.Printf("[%s/%s] Stopping partition consumer for %s/%d\n", cg.name, cg.id, topic, partition)
+	sarama.Logger.Printf("[%s] Stopping partition consumer for %s:%d\n", cg.name, topic, partition)
 }

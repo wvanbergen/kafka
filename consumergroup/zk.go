@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"log"
-
 	"github.com/samuel/go-zookeeper/zk"
 )
 
@@ -104,7 +102,6 @@ func (z *ZK) Partitions(topic string) (partitionLeaderSlice, error) {
 			return nil, err
 		}
 
-		log.Println(string(value))
 		var partitionNode partitionEntry
 		if err := json.Unmarshal(value, &partitionNode); err != nil {
 			return nil, err
