@@ -9,7 +9,7 @@ import (
 )
 
 type ConsumerGroupConfig struct {
-	// The Zookeeper read timeout
+	// The Zookeeper read timeout. Defaults to 1 second
 	ZookeeperTimeout time.Duration
 
 	// Zookeeper chroot to use. Should not include a trailing slash.
@@ -19,7 +19,7 @@ type ConsumerGroupConfig struct {
 	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new sarama.Client
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new sarama.Consumer
 
-	ChannelBufferSize int           // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering.
+	ChannelBufferSize int           // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering. Default is 16.
 	CommitInterval    time.Duration // The interval between which the prossed offsets are commited to Zookeeper.
 }
 
@@ -168,10 +168,11 @@ func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
 
 func (cg *ConsumerGroup) Close() (err error) {
 	defer cg.zk.Close()
+
 	close(cg.stopper)
 	cg.wg.Wait()
 
-	cg.client.Close()
+	err = cg.client.Close()
 
 	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
 		sarama.Logger.Printf("[%s] FAILED deregistering consumer %s!\n", cg.name, cg.id)
