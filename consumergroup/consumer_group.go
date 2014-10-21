@@ -2,10 +2,16 @@ package consumergroup
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/Shopify/sarama"
+)
+
+var (
+	AlreadyClosed          = errors.New("Already closed consumer")
+	FailedToClaimPartition = errors.New("Failed to claim partition for this consumer instance. Do you have a rogue consumer running?")
 )
 
 type ConsumerGroupConfig struct {
@@ -25,11 +31,9 @@ type ConsumerGroupConfig struct {
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
 	return &ConsumerGroupConfig{
-		ZookeeperTimeout:    1 * time.Second,
-		KafkaClientConfig:   sarama.NewClientConfig(),
-		KafkaConsumerConfig: sarama.NewConsumerConfig(),
-		ChannelBufferSize:   16,
-		CommitInterval:      10 * time.Second,
+		ZookeeperTimeout:  1 * time.Second,
+		ChannelBufferSize: 16,
+		CommitInterval:    10 * time.Second,
 	}
 }
 
@@ -46,16 +50,16 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 		return errors.New("ChannelBufferSize should be >= 0.")
 	}
 
-	if cgc.KafkaClientConfig == nil {
-		return errors.New("KafkaClientConfig is not set!")
-	} else if err := cgc.KafkaClientConfig.Validate(); err != nil {
-		return err
+	if cgc.KafkaClientConfig != nil {
+		if err := cgc.KafkaClientConfig.Validate(); err != nil {
+			return err
+		}
 	}
 
-	if cgc.KafkaConsumerConfig == nil {
-		return errors.New("KafkaConsumerConfig is not set!")
-	} else if err := cgc.KafkaConsumerConfig.Validate(); err != nil {
-		return err
+	if cgc.KafkaConsumerConfig != nil {
+		if err := cgc.KafkaConsumerConfig.Validate(); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -131,20 +135,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		return
 	}
 
-	// Register consumer group
-	if err = zk.RegisterGroup(name); err != nil {
-		return
-	}
-
-	// Register itself with zookeeper
-	if err = zk.RegisterConsumer(name, consumerID, topics); err != nil {
-		sarama.Logger.Printf("[%s] FAILED to register consumer %s!\n", name, consumerID)
-		return
-	} else {
-		sarama.Logger.Printf("[%s] Registered consumer %s.\n", name, consumerID)
-	}
-
-	group := &ConsumerGroup{
+	cg = &ConsumerGroup{
 		id:      consumerID,
 		name:    name,
 		config:  config,
@@ -156,9 +147,23 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		offsets: make(map[string]map[int32]int64),
 	}
 
-	go group.topicListConsumer(topics)
+	// Register consumer group
+	if err = zk.RegisterGroup(name); err != nil {
+		cg.Logf("FAILED to register consumer group (%s)!\n")
+		return
+	}
 
-	return group, nil
+	// Register itself with zookeeper
+	if err = zk.RegisterConsumer(name, consumerID, topics); err != nil {
+		cg.Logf("FAILED to register consumer instance (%s)!\n", cg.id)
+		return
+	} else {
+		cg.Logf("Consumer instance registered (%s).", cg.id)
+	}
+
+	go cg.topicListConsumer(topics)
+
+	return
 }
 
 // Returns a channel that you can read to obtain events from Kafka to process.
@@ -166,23 +171,40 @@ func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
 	return cg.events
 }
 
+func (cg *ConsumerGroup) Closed() bool {
+	return cg.id == ""
+}
+
 func (cg *ConsumerGroup) Close() (err error) {
+	if cg.Closed() {
+		return AlreadyClosed
+	}
+
 	defer cg.zk.Close()
 
+	cg.Logf("Waiting for partition consumers to stop...")
 	close(cg.stopper)
 	cg.wg.Wait()
 
-	err = cg.client.Close()
+	cg.Logf("Closing the Sarama client...")
+	if err = cg.client.Close(); err != nil {
+		cg.Logf("FAILED closing the Sarama client!\n")
+	}
 
+	cg.Logf("Deregistering the consumer...")
 	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
-		sarama.Logger.Printf("[%s] FAILED deregistering consumer %s!\n", cg.name, cg.id)
-		return err
+		cg.Logf("FAILED deregistering consumer!\n")
 	} else {
-		sarama.Logger.Printf("[%s] Deregistered consumer %s.\n", cg.name, cg.id)
+		cg.Logf("Deregistered consumer.\n")
 	}
 
 	close(cg.events)
+	cg.id = ""
 	return
+}
+
+func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
+	sarama.Logger.Printf("[%s/%s] %s", cg.name, cg.id[len(cg.id)-12:], fmt.Sprintf(format, args...))
 }
 
 func (cg *ConsumerGroup) topicListConsumer(topics []string) {
@@ -199,7 +221,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 		}
 
 		cg.consumers = consumers
-		sarama.Logger.Printf("[%s] Currently registered consumers: %d\n", cg.name, len(cg.consumers))
+		cg.Logf("Currently registered consumers: %d\n", len(cg.consumers))
 
 		stopper := make(chan struct{})
 
@@ -214,7 +236,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 			return
 
 		case <-consumerChanges:
-			sarama.Logger.Printf("[%s] Triggering rebalance due to consumer list change.\n", cg.name)
+			cg.Logf("Triggering rebalance due to consumer list change.\n")
 			close(stopper)
 			cg.wg.Wait()
 		}
@@ -224,7 +246,13 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent, stopper <-chan struct{}) {
 	defer cg.wg.Done()
 
-	sarama.Logger.Printf("[%s] Started topic consumer for %s\n", cg.name, topic)
+	select {
+	case <-stopper:
+		return
+	default:
+	}
+
+	cg.Logf("Started topic consumer for %s\n", topic)
 
 	// Fetch a list of partition IDs
 	partitions, err := cg.zk.Partitions(topic)
@@ -234,7 +262,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 
 	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitions)
 	myPartitions := dividedPartitions[cg.id]
-	sarama.Logger.Printf("[%s] Claiming %d of %d partitions for topic %s.", cg.name, len(myPartitions), len(partitions), topic)
+	cg.Logf("Claiming %d of %d partitions for topic %s.", len(myPartitions), len(partitions), topic)
 
 	// Consume all the assigned partitions
 	var wg sync.WaitGroup
@@ -245,12 +273,18 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 	}
 
 	wg.Wait()
-	sarama.Logger.Printf("[%s] Stopped topic consumer for %s\n", cg.name, topic)
+	cg.Logf("Stopped topic consumer for %s\n", topic)
 }
 
 // Consumes a partition
 func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup, stopper <-chan struct{}) {
 	defer wg.Done()
+
+	select {
+	case <-stopper:
+		return
+	default:
+	}
 
 	err := cg.zk.Claim(cg.name, topic, partition, cg.id)
 	if err != nil {
@@ -263,24 +297,33 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		panic(err)
 	}
 
-	if lastOffset > 0 {
-		cg.config.KafkaConsumerConfig.OffsetMethod = sarama.OffsetMethodManual
-		cg.config.KafkaConsumerConfig.OffsetValue = lastOffset + 1
+	var config *sarama.ConsumerConfig
+	if cg.config.KafkaConsumerConfig == nil {
+		config = sarama.NewConsumerConfig()
 	} else {
-		cg.config.KafkaConsumerConfig.OffsetMethod = sarama.OffsetMethodOldest
+		*config = *cg.config.KafkaConsumerConfig
 	}
 
-	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, cg.config.KafkaConsumerConfig)
+	if lastOffset > 0 {
+		config.OffsetMethod = sarama.OffsetMethodManual
+		config.OffsetValue = lastOffset + 1
+	} else if config.OffsetMethod == sarama.OffsetMethodManual && config.OffsetValue == 0 {
+		config.OffsetMethod = sarama.OffsetMethodOldest
+	}
+
+	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, config)
 	if err != nil {
 		panic(err)
 	}
 	defer consumer.Close()
 
-	sarama.Logger.Printf("[%s] Started partition consumer for %s:%d at offset %d.\n", cg.name, topic, partition, lastOffset)
+	cg.Logf("Started partition consumer for %s:%d at offset %d.\n", topic, partition, lastOffset)
 
 	partitionEvents := consumer.Events()
 	commitTicker := time.NewTicker(cg.config.CommitInterval)
 	defer commitTicker.Stop()
+
+	var lastCommittedOffset int64
 
 partitionConsumerLoop:
 	for {
@@ -290,12 +333,35 @@ partitionConsumerLoop:
 				panic(event.Err)
 			}
 
-			lastOffset = event.Offset
-			events <- event
+			if lastOffset != 0 && lastOffset+1 != event.Offset {
+				panic(fmt.Sprintf("Expected offset %d, got %d!", lastOffset+1, event.Offset))
+			}
+
+			for attempt := 0; attempt < 10; attempt++ {
+				select {
+				case events <- event:
+					lastOffset = event.Offset
+					continue partitionConsumerLoop
+
+				default:
+					nextAttemptAfter := time.After(100 * time.Millisecond)
+					select {
+					case <-stopper:
+						break partitionConsumerLoop
+					case <-nextAttemptAfter:
+						continue
+					}
+				}
+			}
+			panic("Failed to submit event to channel!")
 
 		case <-commitTicker.C:
-			if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
-				sarama.Logger.Printf("[%s] Failed to commit offset for %s:%d\n", cg.name, topic, partition)
+			if lastCommittedOffset < lastOffset {
+				if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+					cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
+				} else {
+					lastCommittedOffset = lastOffset
+				}
 			}
 
 		case <-stopper:
@@ -303,9 +369,13 @@ partitionConsumerLoop:
 		}
 	}
 
-	if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
-		sarama.Logger.Printf("[%s] Failed to commit offset for %s:%d\n", cg.name, topic, partition)
+	if lastCommittedOffset < lastOffset {
+		if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+			cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
+		} else {
+			cg.Logf("Committed offset %d for %s:%d\n", lastOffset, topic, partition)
+		}
 	}
 
-	sarama.Logger.Printf("[%s] Stopping partition consumer for %s:%d at offset %d.\n", cg.name, topic, partition, lastOffset)
+	cg.Logf("Stopping partition consumer for %s:%d at offset %d.\n", topic, partition, lastOffset)
 }

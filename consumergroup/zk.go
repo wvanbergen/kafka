@@ -123,10 +123,13 @@ func (z *ZK) Claim(group, topic string, partition int32, id string) (err error) 
 	node := fmt.Sprintf("%s/%d", root, partition)
 	tries := 0
 	for {
+		tries++
 		if err = z.Create(node, []byte(id), true); err == nil {
 			break
-		} else if tries++; err != zk.ErrNodeExists || tries > 100 {
+		} else if err != zk.ErrNodeExists {
 			return err
+		} else if tries > 100 {
+			return FailedToClaimPartition
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
