@@ -51,10 +51,7 @@ func (s partitionLeaderSlice) Len() int {
 }
 
 func (s partitionLeaderSlice) Less(i, j int) bool {
-	if s[i].leader < s[j].leader {
-		return true
-	}
-	return s[i].id < s[j].id
+	return s[i].leader < s[j].leader || (s[i].leader == s[j].leader && s[i].id < s[j].id)
 }
 
 func (s partitionLeaderSlice) Swap(i, j int) {
