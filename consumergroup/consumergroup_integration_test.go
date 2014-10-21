@@ -95,7 +95,7 @@ func setupZookeeper(t *testing.T, topic string, partitions int32) {
 	}
 	defer zk.Close()
 
-	for partition := int32(0); partition < partitions; partitions++ {
+	for partition := int32(0); partition < partitions; partition++ {
 		// Retrieve the offset that Sarama will use for the next message on the topic/partition.
 		nextOffset, offsetErr := client.GetOffset(topic, partition, sarama.LatestOffsets)
 		if offsetErr != nil {
