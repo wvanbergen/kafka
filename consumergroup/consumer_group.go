@@ -25,15 +25,17 @@ type ConsumerGroupConfig struct {
 	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new sarama.Client
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new sarama.Consumer
 
-	ChannelBufferSize int           // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering. Default is 16.
-	CommitInterval    time.Duration // The interval between which the prossed offsets are commited to Zookeeper.
+	ChannelBufferSize   int                 // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering. Default is 256.
+	CommitInterval      time.Duration       // The interval between which the prossed offsets are commited to Zookeeper.
+	InitialOffsetMethod sarama.OffsetMethod // The initial offset method to use if the consumer has no previously stored offset. Must be either sarama.OffsetMethodOldest (default) or sarama.OffsetMethodNewest.
 }
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
 	return &ConsumerGroupConfig{
-		ZookeeperTimeout:  1 * time.Second,
-		ChannelBufferSize: 16,
-		CommitInterval:    10 * time.Second,
+		ZookeeperTimeout:    1 * time.Second,
+		ChannelBufferSize:   256,
+		CommitInterval:      10 * time.Second,
+		InitialOffsetMethod: sarama.OffsetMethodOldest,
 	}
 }
 
@@ -54,6 +56,10 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 		if err := cgc.KafkaClientConfig.Validate(); err != nil {
 			return err
 		}
+	}
+
+	if cgc.InitialOffsetMethod != sarama.OffsetMethodNewest && cgc.InitialOffsetMethod != sarama.OffsetMethodOldest {
+		return errors.New("InitialOffsetMethod should OffsetMethodNewest or OffsetMethodOldest.")
 	}
 
 	if cgc.KafkaConsumerConfig != nil {
@@ -204,7 +210,26 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 	sarama.Logger.Printf("[%s/%s] %s", cg.name, cg.id[len(cg.id)-12:], fmt.Sprintf(format, args...))
 }
 
+func (cg *ConsumerGroup) closeOnPanic() {
+	if err := recover(); err != nil {
+		cg.Logf("Error: %s\n", err)
+
+		// Try to produce an error event on the channel so we can inform the consumer.
+		// If that doesn't work, continue.
+		errorEvent := &sarama.ConsumerEvent{Err: fmt.Errorf("%s", err)}
+		select {
+		case cg.events <- errorEvent:
+		default:
+		}
+
+		// Now, close the consumer
+		cg.Close()
+	}
+}
+
 func (cg *ConsumerGroup) topicListConsumer(topics []string) {
+	defer cg.closeOnPanic()
+
 	for {
 		select {
 		case <-cg.stopper:
@@ -241,6 +266,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 }
 
 func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent, stopper <-chan struct{}) {
+	defer cg.closeOnPanic()
 	defer cg.wg.Done()
 
 	select {
@@ -275,6 +301,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 
 // Consumes a partition
 func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup, stopper <-chan struct{}) {
+	defer cg.closeOnPanic()
 	defer wg.Done()
 
 	select {
@@ -304,8 +331,8 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	if lastOffset > 0 {
 		config.OffsetMethod = sarama.OffsetMethodManual
 		config.OffsetValue = lastOffset + 1
-	} else if config.OffsetMethod == sarama.OffsetMethodManual && config.OffsetValue == 0 {
-		config.OffsetMethod = sarama.OffsetMethodOldest
+	} else {
+		config.OffsetMethod = cg.config.InitialOffsetMethod
 	}
 
 	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, config)
@@ -322,19 +349,22 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 
 	var lastCommittedOffset int64
 
+	err = nil
 partitionConsumerLoop:
 	for {
 		select {
 		case event := <-partitionEvents:
 			if event.Err != nil {
-				panic(event.Err)
+				err = event.Err
+				break partitionConsumerLoop
 			}
 
 			if lastOffset != 0 && lastOffset+1 != event.Offset {
-				panic(fmt.Sprintf("Expected offset %d, got %d!", lastOffset+1, event.Offset))
+				err = fmt.Errorf("Expected offset %d, got %d!", lastOffset+1, event.Offset)
+				break partitionConsumerLoop
 			}
 
-			for attempt := 0; attempt < 10; attempt++ {
+			for {
 				select {
 				case events <- event:
 					lastOffset = event.Offset
@@ -350,7 +380,9 @@ partitionConsumerLoop:
 					}
 				}
 			}
-			panic("Failed to submit event to channel!")
+
+			err = errors.New("Failed to submit event to channel! You may need to run additional consumers to keep up.")
+			break partitionConsumerLoop
 
 		case <-commitTicker.C:
 			if lastCommittedOffset < lastOffset {

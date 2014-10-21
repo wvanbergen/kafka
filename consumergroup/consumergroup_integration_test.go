@@ -40,6 +40,11 @@ func ExampleConsumerGroup() {
 	eventCount := 0
 
 	for event := range consumer.Events() {
+		if event.Err != nil {
+			log.Println(event.Err)
+			break
+		}
+
 		// Process event
 		log.Println(string(event.Value))
 		eventCount += 1
@@ -139,7 +144,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 
 	// If the channel is buffered, the consumer will enqueue more events in the channel,
 	// which assertEvents will simply skip. When consumer 2 starts it will skip a bunch of
-	// events because of this. Transactikonal processing will fix this.
+	// events because of this. Transactional processing will fix this.
 	config := NewConsumerGroupConfig()
 	config.ChannelBufferSize = 0
 
