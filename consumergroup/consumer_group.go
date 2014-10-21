@@ -20,6 +20,7 @@ type ConsumerGroupConfig struct {
 	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new sarama.Consumer
 
 	ChannelBufferSize int
+	CommitInterval    time.Duration
 }
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
@@ -28,6 +29,7 @@ func NewConsumerGroupConfig() *ConsumerGroupConfig {
 		KafkaClientConfig:   sarama.NewClientConfig(),
 		KafkaConsumerConfig: sarama.NewConsumerConfig(),
 		ChannelBufferSize:   10,
+		CommitInterval:      10 * time.Second,
 	}
 }
 
@@ -66,6 +68,7 @@ type ConsumerGroup struct {
 
 	brokers   map[int]string
 	consumers []string
+	offsets   map[string]map[int32]int64
 }
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
@@ -140,6 +143,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		zk:      zk,
 		events:  make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
 		stopper: make(chan struct{}),
+		offsets: make(map[string]map[int32]int64),
 	}
 
 	go group.topicListConsumer(topics)
@@ -237,25 +241,52 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	}
 	defer cg.zk.Release(cg.name, topic, partition, cg.id)
 
-	cg.config.KafkaConsumerConfig.OffsetMethod = sarama.OffsetMethodOldest
+	lastOffset, err := cg.zk.Offset(cg.name, topic, partition)
+	if err != nil {
+		panic(err)
+	}
+
+	if lastOffset > 0 {
+		cg.config.KafkaConsumerConfig.OffsetMethod = sarama.OffsetMethodManual
+		cg.config.KafkaConsumerConfig.OffsetValue = lastOffset + 1
+	} else {
+		cg.config.KafkaConsumerConfig.OffsetMethod = sarama.OffsetMethodOldest
+	}
+
 	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, cg.config.KafkaConsumerConfig)
 	if err != nil {
 		panic(err)
 	}
 	defer consumer.Close()
 
-	sarama.Logger.Printf("[%s] Started partition consumer for %s:%d\n", cg.name, topic, partition)
+	sarama.Logger.Printf("[%s] Started partition consumer for %s:%d at offset %d.\n", cg.name, topic, partition, lastOffset)
 
 	partitionEvents := consumer.Events()
+	commitInterval := time.After(cg.config.CommitInterval)
 partitionConsumerLoop:
 	for {
 		select {
 		case event := <-partitionEvents:
+			if event.Err != nil {
+				panic(event.Err)
+			}
+
+			lastOffset = event.Offset
 			events <- event
+
+		case <-commitInterval:
+			if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+				sarama.Logger.Printf("[%s] Failed to commit offset for %s:%d\n", cg.name, topic, partition)
+			}
+
 		case <-stopper:
 			break partitionConsumerLoop
 		}
 	}
 
-	sarama.Logger.Printf("[%s] Stopping partition consumer for %s:%d\n", cg.name, topic, partition)
+	if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+		sarama.Logger.Printf("[%s] Failed to commit offset for %s:%d\n", cg.name, topic, partition)
+	}
+
+	sarama.Logger.Printf("[%s] Stopping partition consumer for %s:%d at offset %d.\n", cg.name, topic, partition, lastOffset)
 }
