@@ -27,6 +27,7 @@ func NewConsumerGroupConfig() *ConsumerGroupConfig {
 		ZookeeperTimeout:    1 * time.Second,
 		KafkaClientConfig:   sarama.NewClientConfig(),
 		KafkaConsumerConfig: sarama.NewConsumerConfig(),
+		ChannelBufferSize:   10,
 	}
 }
 
