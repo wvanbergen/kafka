@@ -138,8 +138,6 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 }
 
 func TestSingleTopicSequentialConsumer(t *testing.T) {
-	sarama.Logger = log.New(os.Stdout, "", log.LstdFlags)
-
 	consumerGroup := "TestSingleTopicSequentialConsumer"
 	setupZookeeper(t, consumerGroup, "single_partition", 1)
 	go produceEvents(t, consumerGroup, "single_partition", 20)
@@ -152,7 +150,6 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	config := NewConsumerGroupConfig()
 	config.ChannelBufferSize = 0
 
-	sarama.Logger.Println("Start consumer 1")
 	consumer1, err := JoinConsumerGroup(consumerGroup, []string{"single_partition"}, zookeeper, config)
 	if err != nil {
 		t.Fatal(err)
@@ -160,11 +157,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	defer consumer1.Close()
 
 	assertEvents(t, consumer1.Events(), 10, offsets)
-	sarama.Logger.Println("Closing consumer 1...")
 	consumer1.Close()
-
-	sarama.Logger.Println("Consumer 1 all done")
-	sarama.Logger.Println("Start consumer 2")
 
 	consumer2, err := JoinConsumerGroup(consumerGroup, []string{"single_partition"}, zookeeper, nil)
 	if err != nil {
@@ -174,8 +167,6 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 
 	assertEvents(t, consumer2.Events(), 10, offsets)
 	consumer2.Close()
-
-	sarama.Logger.Println("Consumer 2 all done")
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -203,13 +194,11 @@ func assertEvents(t *testing.T, stream <-chan *sarama.ConsumerEvent, count int64
 					offsets[event.Topic] = make(map[int32]int64)
 				}
 				if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition]+1 != event.Offset {
-					sarama.Logger.Printf("Unexpected offset on %s:%d. Expected %d, got %d.", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset)
 					t.Fatalf("Unexpected offset on %s:%d. Expected %d, got %d.", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset)
 				}
 
 				processed += 1
 
-				sarama.Logger.Printf("Offset %d (processed %d of %d)\n", event.Offset, processed, count)
 				offsets[event.Topic][event.Partition] = event.Offset
 			}
 

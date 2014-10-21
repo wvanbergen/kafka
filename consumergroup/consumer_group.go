@@ -182,16 +182,13 @@ func (cg *ConsumerGroup) Close() (err error) {
 
 	defer cg.zk.Close()
 
-	cg.Logf("Waiting for partition consumers to stop...")
 	close(cg.stopper)
 	cg.wg.Wait()
 
-	cg.Logf("Closing the Sarama client...")
 	if err = cg.client.Close(); err != nil {
 		cg.Logf("FAILED closing the Sarama client!\n")
 	}
 
-	cg.Logf("Deregistering the consumer...")
 	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
 		cg.Logf("FAILED deregistering consumer!\n")
 	} else {
