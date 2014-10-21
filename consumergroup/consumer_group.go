@@ -279,7 +279,8 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	sarama.Logger.Printf("[%s] Started partition consumer for %s:%d at offset %d.\n", cg.name, topic, partition, lastOffset)
 
 	partitionEvents := consumer.Events()
-	commitInterval := time.After(cg.config.CommitInterval)
+	commitTicker := time.NewTicker(cg.config.CommitInterval)
+	defer commitTicker.Stop()
 
 partitionConsumerLoop:
 	for {
@@ -292,7 +293,7 @@ partitionConsumerLoop:
 			lastOffset = event.Offset
 			events <- event
 
-		case <-commitInterval:
+		case <-commitTicker.C:
 			if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
 				sarama.Logger.Printf("[%s] Failed to commit offset for %s:%d\n", cg.name, topic, partition)
 			}
