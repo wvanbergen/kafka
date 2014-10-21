@@ -17,7 +17,7 @@ var (
 )
 
 func init() {
-	consumerGroupName = "integration_test.single"
+	consumerGroupName = "integration_test"
 	zookeeper = []string{"localhost:2181"}
 	kafkaTopics = []string{"single_partition", "multi_partition"}
 }
