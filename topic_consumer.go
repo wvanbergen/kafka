@@ -71,7 +71,7 @@ func main() {
 
 		eventCount += 1
 		if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition] != event.Offset-1 {
-			log.Printf("Unexpected offset on partition %d: %d. Expected %d\n", event.Partition, event.Offset, offsets[event.Topic][event.Partition]+1)
+			log.Printf("Unexpected offset on %s:%d. Expected %d, found %d, diff %d.\n", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset, event.Offset-offsets[event.Topic][event.Partition]+1)
 		}
 
 		offsets[event.Topic][event.Partition] = event.Offset
