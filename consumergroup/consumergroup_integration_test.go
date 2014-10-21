@@ -39,16 +39,9 @@ func ExampleConsumerGroup() {
 
 	eventCount := 0
 
-	stream := consumer.Events()
-	for {
-		event, ok := <-stream
-		if !ok {
-			break
-		}
-
+	for event := range consumer.Events() {
 		// Process event
 		log.Println(string(event.Value))
-
 		eventCount += 1
 	}
 

@@ -59,11 +59,7 @@ func main() {
 	offsets := make(map[string]map[int32]int64)
 
 	stream := consumer.Events()
-	for {
-		event, ok := <-stream
-		if !ok {
-			break
-		}
+	for event := range stream {
 
 		if offsets[event.Topic] == nil {
 			offsets[event.Topic] = make(map[int32]int64)
