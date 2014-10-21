@@ -35,6 +35,9 @@ func (z *ZK) Brokers() (map[int]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(children) == 0 {
+		return nil, fmt.Errorf("No Kafa brokers registered in Zookeeper cluster at root %s.", z.chroot)
+	}
 
 	type brokerEntry struct {
 		Host string `json:host`
@@ -191,9 +194,9 @@ func (z *ZK) RegisterGroup(group string) error {
 }
 
 // CreateConsumer registers a new consumer within a group
-func (z *ZK) RegisterConsumer(group, id string, topics []string) error {
+func (z *ZK) RegisterConsumer(group, id string, topics TopicSubscriptions) error {
 	subscription := make(map[string]int)
-	for _, topic := range topics {
+	for topic, _ := range topics {
 		subscription[topic] = 1
 	}
 
