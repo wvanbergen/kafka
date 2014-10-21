@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DefaultKafkaTopic    = "nginx.multitrack"
+	DefaultKafkaTopics   = "nginx.multitrack,checkout"
 	DefaultConsumerGroup = "topic_consumer.go"
 )
 
@@ -24,7 +24,7 @@ var (
 
 func init() {
 	consumerGroup = *flag.String("group", DefaultConsumerGroup, "The name of the consumer group, used for coordination and load balancing")
-	kafkaTopicsCSV := flag.String("topics", DefaultKafkaTopic, "The comma-separated list of topics to consume")
+	kafkaTopicsCSV := flag.String("topics", DefaultKafkaTopics, "The comma-separated list of topics to consume")
 	zookeeperCSV := flag.String("zookeeper", "", "A comma-separated Zookeeper connection string (e.g. `zookeeper1.local:2181,zookeeper2.local:2181,zookeeper3.local:2181`)")
 
 	flag.Parse()
