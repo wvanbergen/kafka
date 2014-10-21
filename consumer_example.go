@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DefaultKafkaTopics   = "nginx.multitrack,checkout"
+	DefaultKafkaTopics   = "nginx.multitrack"
 	DefaultConsumerGroup = "consumer_example.go"
 )
 
@@ -41,6 +41,8 @@ func init() {
 }
 
 func main() {
+	config := sarama.NewConsumerConfig()
+	config.OffsetMethod = sarama.OffsetMethodNewest
 	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, nil)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
@@ -60,6 +62,10 @@ func main() {
 
 	stream := consumer.Events()
 	for event := range stream {
+		if event.Err != nil {
+			log.Println(event.Err)
+			break
+		}
 
 		if offsets[event.Topic] == nil {
 			offsets[event.Topic] = make(map[int32]int64)
