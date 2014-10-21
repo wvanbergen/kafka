@@ -175,6 +175,11 @@ func (cg *ConsumerGroup) Close() (err error) {
 
 func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 	for {
+		select {
+		case <-cg.stopper:
+			return
+		default:
+		}
 
 		consumers, consumerChanges, err := cg.zk.Consumers(cg.name)
 		if err != nil {
