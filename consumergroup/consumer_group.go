@@ -237,6 +237,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	}
 	defer cg.zk.Release(cg.name, topic, partition, cg.id)
 
+	cg.config.KafkaConsumerConfig.OffsetMethod = sarama.OffsetMethodOldest
 	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, cg.config.KafkaConsumerConfig)
 	if err != nil {
 		panic(err)
