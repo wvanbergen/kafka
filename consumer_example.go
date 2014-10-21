@@ -13,7 +13,7 @@ import (
 
 const (
 	DefaultKafkaTopics   = "nginx.multitrack,checkout"
-	DefaultConsumerGroup = "topic_consumer.go"
+	DefaultConsumerGroup = "consumer_example.go"
 )
 
 var (
@@ -78,4 +78,5 @@ func main() {
 	}
 
 	log.Printf("Processed %d events.", eventCount)
+	log.Printf("%+v", offsets)
 }
