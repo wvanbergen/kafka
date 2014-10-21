@@ -2,49 +2,40 @@ package consumergroup
 
 import (
 	"errors"
-	"math"
-	"sort"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/Shopify/sarama"
-	"github.com/samuel/go-zookeeper/zk"
 )
 
 var (
-	DiscardCommit = errors.New("sarama: commit discarded")
-	NoCheckout    = errors.New("sarama: not checkout")
-)
-
-const (
-	REBALANCE_START uint8 = iota + 1
-	REBALANCE_OK
-	REBALANCE_ERROR
+	AlreadyClosed          = errors.New("Already closed consumer")
+	FailedToClaimPartition = errors.New("Failed to claim partition for this consumer instance. Do you have a rogue consumer running?")
 )
 
 type ConsumerGroupConfig struct {
-	// The Zookeeper read timeout
+	// The Zookeeper read timeout. Defaults to 1 second
 	ZookeeperTimeout time.Duration
 
 	// Zookeeper chroot to use. Should not include a trailing slash.
-	// Leave this empty for to not set a chroot.
+	// Leave this empty when your Kafka install does not use a chroot.
 	ZookeeperChroot string
 
-	// The preempt interval when listening to a single partition of a topic.
-	// After this interval, the current offset will be committed to Zookeeper,
-	// and a different partition will be checked out to consume next.
-	CheckoutInterval time.Duration
+	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new sarama.Client
+	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new sarama.Consumer
 
-	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new Client
-	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new Consumer
+	ChannelBufferSize   int                 // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering. Default is 256.
+	CommitInterval      time.Duration       // The interval between which the prossed offsets are commited to Zookeeper.
+	InitialOffsetMethod sarama.OffsetMethod // The initial offset method to use if the consumer has no previously stored offset. Must be either sarama.OffsetMethodOldest (default) or sarama.OffsetMethodNewest.
 }
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
 	return &ConsumerGroupConfig{
 		ZookeeperTimeout:    1 * time.Second,
-		CheckoutInterval:    1 * time.Second,
-		KafkaClientConfig:   sarama.NewClientConfig(),
-		KafkaConsumerConfig: sarama.NewConsumerConfig(),
+		ChannelBufferSize:   256,
+		CommitInterval:      10 * time.Second,
+		InitialOffsetMethod: sarama.OffsetMethodOldest,
 	}
 }
 
@@ -53,103 +44,94 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 		return errors.New("ZookeeperTimeout should have a duration > 0")
 	}
 
-	if cgc.KafkaClientConfig == nil {
-		return errors.New("KafkaClientConfig is not set!")
-	} else if err := cgc.KafkaClientConfig.Validate(); err != nil {
-		return err
+	if cgc.CommitInterval <= 0 {
+		return errors.New("CommitInterval should have a duration > 0")
 	}
 
-	if cgc.KafkaConsumerConfig == nil {
-		return errors.New("KafkaConsumerConfig is not set!")
-	} else if err := cgc.KafkaConsumerConfig.Validate(); err != nil {
-		return err
+	if cgc.ChannelBufferSize < 0 {
+		return errors.New("ChannelBufferSize should be >= 0.")
+	}
+
+	if cgc.KafkaClientConfig != nil {
+		if err := cgc.KafkaClientConfig.Validate(); err != nil {
+			return err
+		}
+	}
+
+	if cgc.InitialOffsetMethod != sarama.OffsetMethodNewest && cgc.InitialOffsetMethod != sarama.OffsetMethodOldest {
+		return errors.New("InitialOffsetMethod should OffsetMethodNewest or OffsetMethodOldest.")
+	}
+
+	if cgc.KafkaConsumerConfig != nil {
+		if err := cgc.KafkaConsumerConfig.Validate(); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-// A ConsumerGroup operates on all partitions of a single topic. The goal is to ensure
-// each topic message is consumed only once, no matter of the number of consumer instances within
-// a cluster, as described in: http://kafka.apache.org/documentation.html#distributionimpl.
-//
-// The ConsumerGroup internally creates multiple Consumer instances. It uses Zookkeper
-// and follows a simple consumer rebalancing algorithm which allows all the consumers
-// in a group to come into consensus on which consumer is consuming which partitions. Each
-// ConsumerGroup can 'claim' 0-n partitions and will consume their messages until another
-// ConsumerGroup instance with the same name joins or leaves the cluster.
-//
-// Unlike stated in the Kafka documentation, consumer rebalancing is *only* triggered on each
-// addition or removal of consumers within the same group, while the addition of broker nodes
-// and/or partition *does currently not trigger* a rebalancing cycle.
+// The ConsumerGroup type holds all the information for a consumer that is part
+// of a consumer group. Call JoinConsumerGroup to start a consumer.
 type ConsumerGroup struct {
-	id, name, topic string
+	id, name string
 
 	config *ConsumerGroupConfig
 
 	client *sarama.Client
-	zoo    *ZK
-	claims []*PartitionConsumer
-	wg     *sync.WaitGroup
+	zk     *ZK
 
-	zkchange <-chan zk.Event
-	claimed  chan *PartitionConsumer
-	listener chan *Notification
+	wg sync.WaitGroup
 
-	events chan *sarama.ConsumerEvent
+	events  chan *sarama.ConsumerEvent
+	stopper chan struct{}
 
-	checkout, force, stopper chan bool
+	brokers   map[int]string
+	consumers []string
+	offsets   map[string]map[int32]int64
 }
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
-func JoinConsumerGroup(name string, topic string, zookeeper []string, config *ConsumerGroupConfig) (cg *ConsumerGroup, err error) {
+func JoinConsumerGroup(name string, topics []string, zookeeper []string, config *ConsumerGroupConfig) (cg *ConsumerGroup, err error) {
 
-	if config == nil {
-		config = NewConsumerGroupConfig()
+	if name == "" {
+		return nil, sarama.ConfigurationError("Empty consumergroup name")
 	}
 
-	if err := config.Validate(); err != nil {
-		return nil, err
+	if len(topics) == 0 {
+		return nil, sarama.ConfigurationError("No topics provided")
 	}
 
 	if len(zookeeper) == 0 {
 		return nil, errors.New("You need to provide at least one zookeeper node address!")
 	}
 
-	var zk *ZK
-	if zk, err = NewZK(zookeeper, config.ZookeeperChroot, config.ZookeeperTimeout); err != nil {
-		return nil, err
+	if config == nil {
+		config = NewConsumerGroupConfig()
 	}
-
-	var kafkaBrokers []string
-	if kafkaBrokers, err = zk.Brokers(); err != nil {
-		return
-	}
-
-	var client *sarama.Client
-	if client, err = sarama.NewClient(name, kafkaBrokers, config.KafkaClientConfig); err != nil {
-		return
-	}
-
-	return NewConsumerGroup(client, zk, name, topic, nil, config)
-}
-
-// NewConsumerGroup creates a new consumer group for a given topic.
-//
-// You MUST call Close() on a consumer to avoid leaks, it will not be garbage-collected automatically when
-// it passes out of scope (this is in addition to calling Close on the underlying client, which is still necessary).
-func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string, listener chan *Notification, config *ConsumerGroupConfig) (group *ConsumerGroup, err error) {
 
 	// Validate configuration
 	if err = config.Validate(); err != nil {
 		return
-	} else if topic == "" {
-		return nil, sarama.ConfigurationError("Empty topic")
-	} else if name == "" {
-		return nil, sarama.ConfigurationError("Empty name")
 	}
 
-	// Register consumer group
-	if err = zoo.RegisterGroup(name); err != nil {
+	var zk *ZK
+	if zk, err = NewZK(zookeeper, config.ZookeeperChroot, config.ZookeeperTimeout); err != nil {
+		return
+	}
+
+	brokers, err := zk.Brokers()
+	if err != nil {
+		return
+	}
+
+	brokerList := make([]string, 0, len(brokers))
+	for _, broker := range brokers {
+		brokerList = append(brokerList, broker)
+	}
+
+	var client *sarama.Client
+	if client, err = sarama.NewClient(name, brokerList, config.KafkaClientConfig); err != nil {
 		return
 	}
 
@@ -159,311 +141,270 @@ func NewConsumerGroup(client *sarama.Client, zoo *ZK, name string, topic string,
 		return
 	}
 
-	group = &ConsumerGroup{
-		id:    consumerID,
-		name:  name,
-		topic: topic,
-
-		config:   config,
-		client:   client,
-		zoo:      zoo,
-		claims:   make([]*PartitionConsumer, 0),
-		listener: listener,
-
-		stopper:  make(chan bool),
-		checkout: make(chan bool),
-		force:    make(chan bool),
-		claimed:  make(chan *PartitionConsumer),
-
-		events: make(chan *sarama.ConsumerEvent),
+	cg = &ConsumerGroup{
+		id:      consumerID,
+		name:    name,
+		config:  config,
+		brokers: brokers,
+		client:  client,
+		zk:      zk,
+		events:  make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
+		stopper: make(chan struct{}),
+		offsets: make(map[string]map[int32]int64),
 	}
 
-	group.wg = &sync.WaitGroup{}
+	// Register consumer group
+	if err = zk.RegisterGroup(name); err != nil {
+		cg.Logf("FAILED to register consumer group (%s)!\n")
+		return
+	}
 
 	// Register itself with zookeeper
-	if err = zoo.RegisterConsumer(group.name, group.id, group.topic); err != nil {
-		return nil, err
-	}
-
-	group.wg.Add(2)
-	go group.signalLoop()
-	go group.eventLoop()
-	return group, nil
-}
-
-// Checkout applies a callback function to a single partition consumer.
-// The latest consumer offset is automatically comitted to zookeeper if successful.
-// The callback may return a DiscardCommit error to skip the commit silently.
-// Returns an error if any, but may also return a NoCheckout error to indicate
-// that no partition was available. You should add an artificial delay keep your CPU cool.
-func (cg *ConsumerGroup) Checkout(callback func(*PartitionConsumer) error) error {
-	select {
-	case <-cg.stopper:
-		return NoCheckout
-	case cg.checkout <- true:
-	}
-
-	var claimed *PartitionConsumer
-	select {
-	case claimed = <-cg.claimed:
-	case <-cg.stopper:
-		return NoCheckout
-	}
-
-	if claimed == nil {
-		return NoCheckout
-	}
-
-	err := callback(claimed)
-	if err == DiscardCommit {
-		err = nil
-	} else if err == nil && claimed.offset > 0 {
-		sarama.Logger.Printf("Committing partition %d offset %d", claimed.partition, claimed.offset)
-		err = cg.Commit(claimed.partition, claimed.offset)
-	}
-	return err
-}
-
-func (cg *ConsumerGroup) Stream() <-chan *sarama.ConsumerEvent {
-	return cg.events
-}
-
-func (cg *ConsumerGroup) eventLoop() {
-	defer cg.wg.Done()
-EventLoop:
-	for {
-		select {
-		case <-cg.stopper:
-			close(cg.events)
-			break EventLoop
-
-		default:
-			cg.Checkout(func(pc *PartitionConsumer) error {
-				sarama.Logger.Printf("Start consuming partition %d...", pc.partition)
-				return pc.Fetch(cg.events, pc.group.config.CheckoutInterval, cg.stopper)
-			})
-		}
-
-	}
-}
-
-// Commit manually commits an offset for a partition
-func (cg *ConsumerGroup) Commit(partition int32, offset int64) error {
-	return cg.zoo.Commit(cg.name, cg.topic, partition, offset)
-}
-
-// Offset manually retrives an offset for a partition
-func (cg *ConsumerGroup) Offset(partition int32) (int64, error) {
-	return cg.zoo.Offset(cg.name, cg.topic, partition)
-}
-
-// Claims returns the claimed partitions
-func (cg *ConsumerGroup) Claims() []int32 {
-	res := make([]int32, 0, len(cg.claims))
-	for _, claim := range cg.claims {
-		res = append(res, claim.partition)
-	}
-	return res
-}
-
-// Close closes the consumer group
-func (cg *ConsumerGroup) Close() error {
-	close(cg.stopper)
-	cg.wg.Wait()
-	cg.zoo.Close()
-	return nil
-}
-
-// Background signal loop
-func (cg *ConsumerGroup) signalLoop() {
-	defer cg.wg.Done()
-	defer cg.releaseClaims()
-	for {
-		// If we have no zk handle, rebalance
-		if cg.zkchange == nil {
-			if err := cg.rebalance(); err != nil && cg.listener != nil {
-				select {
-				case cg.listener <- &Notification{Type: REBALANCE_ERROR, Src: cg, Err: err}:
-				case <-cg.stopper:
-					return
-				}
-			}
-		}
-
-		// If rebalance failed, check if we had a stop signal, then try again
-		if cg.zkchange == nil {
-			select {
-			case <-cg.stopper:
-				return
-			case <-time.After(time.Millisecond):
-				// Continue
-			}
-			continue
-		}
-
-		// If rebalance worked, wait for a stop signal or a zookeeper change or a fetch-request
-		select {
-		case <-cg.stopper:
-			return
-		case <-cg.force:
-			cg.zkchange = nil
-		case <-cg.zkchange:
-			cg.zkchange = nil
-		case <-cg.checkout:
-			select {
-			case cg.claimed <- cg.nextConsumer():
-			case <-cg.stopper:
-				return
-			}
-		}
-	}
-}
-
-func (cg *ConsumerGroup) EventsBehindLatest() (map[int32]int64, error) {
-	result := make(map[int32]int64, 0)
-	latest, offsetErr := cg.latestOffsets()
-	if offsetErr != nil {
-		return nil, offsetErr
-	}
-
-	for _, pc := range cg.claims {
-		latestOffset := latest[pc.partition]
-		if latestOffset != 0 && pc.offset != 0 {
-			result[pc.partition] = latestOffset - pc.offset
-		}
-	}
-
-	return result, nil
-}
-
-/**********************************************************************
- * PRIVATE
- **********************************************************************/
-
-// Checkout a claimed partition consumer
-func (cg *ConsumerGroup) nextConsumer() *PartitionConsumer {
-	if len(cg.claims) < 1 {
-		return nil
-	}
-
-	shift := cg.claims[0]
-	cg.claims = append(cg.claims[1:], shift)
-	return shift
-}
-
-// Start a rebalance cycle
-func (cg *ConsumerGroup) rebalance() (err error) {
-	var cids []string
-	var pids []int32
-
-	if cg.listener != nil {
-		cg.listener <- &Notification{Type: REBALANCE_START, Src: cg}
-	}
-
-	// Fetch a list of consumers and listen for changes
-	if cids, cg.zkchange, err = cg.zoo.Consumers(cg.name); err != nil {
-		cg.zkchange = nil
+	if err = zk.RegisterConsumer(name, consumerID, topics); err != nil {
+		cg.Logf("FAILED to register consumer instance (%s)!\n", cg.id)
 		return
+	} else {
+		cg.Logf("Consumer instance registered (%s).", cg.id)
 	}
 
-	// Fetch a list of partition IDs
-	if pids, err = cg.client.Partitions(cg.topic); err != nil {
-		cg.zkchange = nil
-		return
-	}
+	go cg.topicListConsumer(topics)
 
-	// Get leaders for each partition ID
-	parts := make(partitionSlice, len(pids))
-	for i, pid := range pids {
-		var broker *sarama.Broker
-		if broker, err = cg.client.Leader(cg.topic, pid); err != nil {
-			cg.zkchange = nil
-			return
-		}
-		defer broker.Close()
-		parts[i] = partitionLeader{id: pid, leader: broker.Addr()}
-	}
-
-	if err = cg.makeClaims(cids, parts); err != nil {
-		cg.zkchange = nil
-		cg.releaseClaims()
-		return
-	}
 	return
 }
 
-func (cg *ConsumerGroup) makeClaims(cids []string, parts partitionSlice) error {
-	cg.releaseClaims()
-
-	for _, part := range cg.claimRange(cids, parts) {
-		pc, err := NewPartitionConsumer(cg, part.id)
-		if err != nil {
-			return err
-		}
-
-		err = cg.zoo.Claim(cg.name, cg.topic, pc.partition, cg.id)
-		if err != nil {
-			return err
-		}
-
-		cg.claims = append(cg.claims, pc)
-	}
-
-	if cg.listener != nil {
-		cg.listener <- &Notification{Type: REBALANCE_OK, Src: cg}
-	}
-	return nil
+// Returns a channel that you can read to obtain events from Kafka to process.
+func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
+	return cg.events
 }
 
-// Determine the partititon numbers to claim
-func (cg *ConsumerGroup) claimRange(cids []string, parts partitionSlice) partitionSlice {
-	sort.Strings(cids)
-	sort.Sort(parts)
-
-	cpos := sort.SearchStrings(cids, cg.id)
-	clen := len(cids)
-	plen := len(parts)
-	if cpos >= clen || cpos >= plen {
-		return make(partitionSlice, 0)
-	}
-
-	step := int(math.Ceil(float64(plen) / float64(clen)))
-	if step < 1 {
-		step = 1
-	}
-
-	last := (cpos + 1) * step
-	first := cpos * step
-	if last > plen {
-		last = plen
-	}
-
-	if first > plen {
-		first = plen
-	}
-
-	return parts[first:last]
+func (cg *ConsumerGroup) Closed() bool {
+	return cg.id == ""
 }
 
-// Releases all claims
-func (cg *ConsumerGroup) releaseClaims() {
-	for _, pc := range cg.claims {
-		sarama.Logger.Printf("Releasing claim for partition %d...\n", pc.partition)
-		pc.Close()
-		cg.zoo.Release(cg.name, cg.topic, pc.partition, cg.id)
+func (cg *ConsumerGroup) Close() (err error) {
+	if cg.Closed() {
+		return AlreadyClosed
 	}
-	cg.claims = cg.claims[:0]
+
+	defer cg.zk.Close()
+
+	close(cg.stopper)
+	cg.wg.Wait()
+
+	if err = cg.client.Close(); err != nil {
+		cg.Logf("FAILED closing the Sarama client!\n")
+	}
+
+	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
+		cg.Logf("FAILED deregistering consumer!\n")
+	} else {
+		cg.Logf("Deregistered consumer.\n")
+	}
+
+	close(cg.events)
+	cg.id = ""
+	return
 }
 
-func (cg *ConsumerGroup) latestOffsets() (map[int32]int64, error) {
-	offsets := make(map[int32]int64)
-	for _, pc := range cg.claims {
-		currentOffset, err := cg.client.GetOffset(cg.topic, pc.partition, sarama.LatestOffsets)
-		if err != nil {
-			return nil, err
+func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
+	sarama.Logger.Printf("[%s/%s] %s", cg.name, cg.id[len(cg.id)-12:], fmt.Sprintf(format, args...))
+}
+
+func (cg *ConsumerGroup) closeOnPanic() {
+	if err := recover(); err != nil {
+		cg.Logf("Error: %s\n", err)
+
+		// Try to produce an error event on the channel so we can inform the consumer.
+		// If that doesn't work, continue.
+		errorEvent := &sarama.ConsumerEvent{Err: fmt.Errorf("%s", err)}
+		select {
+		case cg.events <- errorEvent:
+		default:
 		}
 
-		offsets[pc.partition] = currentOffset
+		// Now, close the consumer
+		cg.Close()
 	}
-	return offsets, nil
+}
+
+func (cg *ConsumerGroup) topicListConsumer(topics []string) {
+	defer cg.closeOnPanic()
+
+	for {
+		select {
+		case <-cg.stopper:
+			return
+		default:
+		}
+
+		consumers, consumerChanges, err := cg.zk.Consumers(cg.name)
+		if err != nil {
+			panic(err)
+		}
+
+		cg.consumers = consumers
+		cg.Logf("Currently registered consumers: %d\n", len(cg.consumers))
+
+		stopper := make(chan struct{})
+
+		for _, topic := range topics {
+			cg.wg.Add(1)
+			go cg.topicConsumer(topic, cg.events, stopper)
+		}
+
+		select {
+		case <-cg.stopper:
+			close(stopper)
+			return
+
+		case <-consumerChanges:
+			cg.Logf("Triggering rebalance due to consumer list change.\n")
+			close(stopper)
+			cg.wg.Wait()
+		}
+	}
+}
+
+func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent, stopper <-chan struct{}) {
+	defer cg.closeOnPanic()
+	defer cg.wg.Done()
+
+	select {
+	case <-stopper:
+		return
+	default:
+	}
+
+	cg.Logf("Started topic consumer for %s\n", topic)
+
+	// Fetch a list of partition IDs
+	partitions, err := cg.zk.Partitions(topic)
+	if err != nil {
+		panic(err)
+	}
+
+	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitions)
+	myPartitions := dividedPartitions[cg.id]
+	cg.Logf("Claiming %d of %d partitions for topic %s.", len(myPartitions), len(partitions), topic)
+
+	// Consume all the assigned partitions
+	var wg sync.WaitGroup
+	for _, pid := range myPartitions {
+
+		wg.Add(1)
+		go cg.partitionConsumer(topic, pid.id, events, &wg, stopper)
+	}
+
+	wg.Wait()
+	cg.Logf("Stopped topic consumer for %s\n", topic)
+}
+
+// Consumes a partition
+func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup, stopper <-chan struct{}) {
+	defer cg.closeOnPanic()
+	defer wg.Done()
+
+	select {
+	case <-stopper:
+		return
+	default:
+	}
+
+	err := cg.zk.Claim(cg.name, topic, partition, cg.id)
+	if err != nil {
+		panic(err)
+	}
+	defer cg.zk.Release(cg.name, topic, partition, cg.id)
+
+	lastOffset, err := cg.zk.Offset(cg.name, topic, partition)
+	if err != nil {
+		panic(err)
+	}
+
+	var config *sarama.ConsumerConfig
+	if cg.config.KafkaConsumerConfig == nil {
+		config = sarama.NewConsumerConfig()
+	} else {
+		*config = *cg.config.KafkaConsumerConfig
+	}
+
+	if lastOffset > 0 {
+		config.OffsetMethod = sarama.OffsetMethodManual
+		config.OffsetValue = lastOffset + 1
+	} else {
+		config.OffsetMethod = cg.config.InitialOffsetMethod
+	}
+
+	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, config)
+	if err != nil {
+		panic(err)
+	}
+	defer consumer.Close()
+
+	cg.Logf("Started partition consumer for %s:%d at offset %d.\n", topic, partition, lastOffset)
+
+	partitionEvents := consumer.Events()
+	commitTicker := time.NewTicker(cg.config.CommitInterval)
+	defer commitTicker.Stop()
+
+	var lastCommittedOffset int64
+
+	err = nil
+partitionConsumerLoop:
+	for {
+		select {
+		case event := <-partitionEvents:
+			if event.Err != nil {
+				err = event.Err
+				break partitionConsumerLoop
+			}
+
+			if lastOffset != 0 && lastOffset+1 != event.Offset {
+				err = fmt.Errorf("Expected offset %d, got %d!", lastOffset+1, event.Offset)
+				break partitionConsumerLoop
+			}
+
+			for {
+				select {
+				case events <- event:
+					lastOffset = event.Offset
+					continue partitionConsumerLoop
+
+				default:
+					nextAttemptAfter := time.After(100 * time.Millisecond)
+					select {
+					case <-stopper:
+						break partitionConsumerLoop
+					case <-nextAttemptAfter:
+						continue
+					}
+				}
+			}
+
+			err = errors.New("Failed to submit event to channel! You may need to run additional consumers to keep up.")
+			break partitionConsumerLoop
+
+		case <-commitTicker.C:
+			if lastCommittedOffset < lastOffset {
+				if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+					cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
+				} else {
+					lastCommittedOffset = lastOffset
+				}
+			}
+
+		case <-stopper:
+			break partitionConsumerLoop
+		}
+	}
+
+	if lastCommittedOffset < lastOffset {
+		if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+			cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
+		} else {
+			cg.Logf("Committed offset %d for %s:%d\n", lastOffset, topic, partition)
+		}
+	}
+
+	cg.Logf("Stopping partition consumer for %s:%d at offset %d.\n", topic, partition, lastOffset)
 }

@@ -4,45 +4,58 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"math"
 	"os"
-	"time"
-
-	"github.com/Shopify/sarama"
+	"sort"
 )
 
-var (
-	clientConfig   = sarama.ClientConfig{MetadataRetries: 5, WaitForElection: 250 * time.Millisecond}
-	consumerConfig = sarama.ConsumerConfig{MaxWaitTime: 500000, DefaultFetchSize: 256 * 1024, MinFetchSize: 1024, OffsetMethod: sarama.OffsetMethodOldest}
-)
+// Divides a set of partitions between a set of consumers.
+func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaderSlice) map[string]partitionLeaderSlice {
+	result := make(map[string]partitionLeaderSlice)
 
-// COMMON TYPES
+	plen := len(partitions)
+	clen := len(consumers)
+
+	sort.Sort(partitions)
+	sort.Strings(consumers)
+
+	n := int(math.Ceil(float64(plen) / float64(clen)))
+	for i, consumer := range consumers {
+		first := i * n
+		if first > plen {
+			first = plen
+		}
+
+		last := (i + 1) * n
+		if last > plen {
+			last = plen
+		}
+
+		result[consumer] = partitions[first:last]
+	}
+
+	return result
+}
 
 // Partition information
 type partitionLeader struct {
 	id     int32
-	leader string
+	leader int
 }
 
 // A sortable slice of Partition structs
-type partitionSlice []partitionLeader
+type partitionLeaderSlice []partitionLeader
 
-func (s partitionSlice) Len() int {
+func (s partitionLeaderSlice) Len() int {
 	return len(s)
 }
 
-func (s partitionSlice) Less(i, j int) bool {
-	if s[i].leader < s[j].leader {
-		return true
-	}
-	return s[i].id < s[j].id
+func (s partitionLeaderSlice) Less(i, j int) bool {
+	return s[i].leader < s[j].leader || (s[i].leader == s[j].leader && s[i].id < s[j].id)
 }
-func (s partitionSlice) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
-// A subscribable notification
-type Notification struct {
-	Type uint8
-	Src  *ConsumerGroup
-	Err  error
+func (s partitionLeaderSlice) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
 }
 
 func generateUUID() (string, error) {

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"sort"
 	"strconv"
 	"time"
 
@@ -30,30 +29,36 @@ func NewZK(servers []string, chroot string, recvTimeout time.Duration) (*ZK, err
  * HIGH LEVEL API
  *******************************************************************/
 
-func (z *ZK) Brokers() ([]string, error) {
+func (z *ZK) Brokers() (map[int]string, error) {
 	root := fmt.Sprintf("%s/brokers/ids", z.chroot)
-	children, _, childrenErr := z.Children(root)
-	if childrenErr != nil {
-		return nil, childrenErr
+	children, _, err := z.Children(root)
+	if err != nil {
+		return nil, err
 	}
 
-	result := make([]string, len(children))
-	for index, child := range children {
-		value, _, childErr := z.Get(path.Join(root, child))
-		if childErr != nil {
-			return nil, childErr
+	type brokerEntry struct {
+		Host string `json:host`
+		Port int    `json:port`
+	}
+
+	result := make(map[int]string)
+	for _, child := range children {
+		brokerID, err := strconv.ParseInt(child, 10, 32)
+		if err != nil {
+			return nil, err
 		}
 
-		type brokerEntry struct {
-			Host string `json:host`
-			Port int    `json:port`
+		value, _, err := z.Get(path.Join(root, child))
+		if err != nil {
+			return nil, err
 		}
+
 		var brokerNode brokerEntry
 		if err := json.Unmarshal(value, &brokerNode); err != nil {
 			return nil, err
 		}
 
-		result[index] = fmt.Sprintf("%s:%d", brokerNode.Host, brokerNode.Port)
+		result[int(brokerID)] = fmt.Sprintf("%s:%d", brokerNode.Host, brokerNode.Port)
 	}
 
 	return result, nil
@@ -71,8 +76,41 @@ func (z *ZK) Consumers(group string) ([]string, <-chan zk.Event, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	sort.Strings(strs)
 	return strs, ch, nil
+}
+
+func (z *ZK) Partitions(topic string) (partitionLeaderSlice, error) {
+	root := fmt.Sprintf("%s/brokers/topics/%s/partitions", z.chroot, topic)
+	children, _, err := z.Children(root)
+	if err != nil {
+		return nil, err
+	}
+
+	type partitionEntry struct {
+		Leader int `json:leader`
+	}
+
+	result := make(partitionLeaderSlice, 0, len(children))
+	for _, child := range children {
+		partitionNumber, err := strconv.ParseInt(child, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		value, _, err := z.Get(path.Join(root, child, "state"))
+		if err != nil {
+			return nil, err
+		}
+
+		var partitionNode partitionEntry
+		if err := json.Unmarshal(value, &partitionNode); err != nil {
+			return nil, err
+		}
+
+		result = append(result, partitionLeader{id: int32(partitionNumber), leader: partitionNode.Leader})
+	}
+
+	return result, nil
 }
 
 // Claim claims a topic/partition ownership for a consumer ID within a group
@@ -85,10 +123,13 @@ func (z *ZK) Claim(group, topic string, partition int32, id string) (err error) 
 	node := fmt.Sprintf("%s/%d", root, partition)
 	tries := 0
 	for {
+		tries++
 		if err = z.Create(node, []byte(id), true); err == nil {
 			break
-		} else if tries++; err != zk.ErrNodeExists || tries > 100 {
+		} else if err != zk.ErrNodeExists {
 			return err
+		} else if tries > 100 {
+			return FailedToClaimPartition
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -153,10 +194,15 @@ func (z *ZK) RegisterGroup(group string) error {
 }
 
 // CreateConsumer registers a new consumer within a group
-func (z *ZK) RegisterConsumer(group, id, topic string) error {
+func (z *ZK) RegisterConsumer(group, id string, topics []string) error {
+	subscription := make(map[string]int)
+	for _, topic := range topics {
+		subscription[topic] = 1
+	}
+
 	data, err := json.Marshal(map[string]interface{}{
 		"pattern":      "white_list",
-		"subscription": map[string]int{topic: 1},
+		"subscription": subscription,
 		"timestamp":    fmt.Sprintf("%d", time.Now().Unix()),
 		"version":      1,
 	})
@@ -165,6 +211,10 @@ func (z *ZK) RegisterConsumer(group, id, topic string) error {
 	}
 
 	return z.Create(fmt.Sprintf("%s/consumers/%s/ids/%s", z.chroot, group, id), data, true)
+}
+
+func (z *ZK) DeregisterConsumer(group, id string) error {
+	return z.Delete(fmt.Sprintf("%s/consumers/%s/ids/%s", z.chroot, group, id), 0)
 }
 
 /*******************************************************************

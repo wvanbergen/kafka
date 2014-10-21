@@ -32,12 +32,17 @@ func NewMonitor(name string, consumergroup string, zookeeper []string, config *C
 		return nil, err
 	}
 
-	kafkaBrokers, err := zkConn.Brokers()
+	brokers, err := zkConn.Brokers()
 	if err != nil {
 		return nil, err
 	}
 
-	saramaClient, err := sarama.NewClient(name, kafkaBrokers, config.KafkaClientConfig)
+	brokerList := make([]string, 0, len(brokers))
+	for _, broker := range brokers {
+		brokerList = append(brokerList, broker)
+	}
+
+	saramaClient, err := sarama.NewClient(name, brokerList, config.KafkaClientConfig)
 	if err != nil {
 		return nil, err
 	}
