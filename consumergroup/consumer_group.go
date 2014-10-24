@@ -207,7 +207,13 @@ func (cg *ConsumerGroup) Close() (err error) {
 }
 
 func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
-	sarama.Logger.Printf("[%s/%s] %s", cg.name, cg.id[len(cg.id)-12:], fmt.Sprintf(format, args...))
+	var identifier string
+	if cg.id == "" {
+		identifier = "(defunct)"
+	} else {
+		identifier = cg.id[len(cg.id)-12:]
+	}
+	sarama.Logger.Printf("[%s/%s] %s", cg.name, identifier, fmt.Sprintf(format, args...))
 }
 
 func (cg *ConsumerGroup) closeOnPanic() {
@@ -316,7 +322,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	}
 	defer cg.zk.Release(cg.name, topic, partition, cg.id)
 
-	lastOffset, err := cg.zk.Offset(cg.name, topic, partition)
+	nextOffset, err := cg.zk.Offset(cg.name, topic, partition)
 	if err != nil {
 		panic(err)
 	}
@@ -328,9 +334,9 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		*config = *cg.config.KafkaConsumerConfig
 	}
 
-	if lastOffset > 0 {
+	if nextOffset > 0 {
 		config.OffsetMethod = sarama.OffsetMethodManual
-		config.OffsetValue = lastOffset
+		config.OffsetValue = nextOffset
 	} else {
 		config.OffsetMethod = cg.config.InitialOffsetMethod
 	}
@@ -341,7 +347,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	}
 	defer consumer.Close()
 
-	cg.Logf("Started partition consumer for %s:%d at offset %d.\n", topic, partition, lastOffset)
+	cg.Logf("Started partition consumer for %s:%d at offset %d.\n", topic, partition, nextOffset)
 
 	partitionEvents := consumer.Events()
 	commitTicker := time.NewTicker(cg.config.CommitInterval)
@@ -350,6 +356,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	var lastCommittedOffset int64
 
 	err = nil
+	var lastOffset int64
 partitionConsumerLoop:
 	for {
 		select {
@@ -360,7 +367,7 @@ partitionConsumerLoop:
 			}
 
 			if lastOffset != 0 && lastOffset+1 != event.Offset {
-				err = fmt.Errorf("Expected offset %d, got %d!", lastOffset+1, event.Offset)
+				err = fmt.Errorf("Expected offset %d, got %d!", lastOffset, event.Offset)
 				break partitionConsumerLoop
 			}
 
