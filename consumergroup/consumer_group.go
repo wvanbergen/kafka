@@ -330,7 +330,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 
 	if lastOffset > 0 {
 		config.OffsetMethod = sarama.OffsetMethodManual
-		config.OffsetValue = lastOffset + 1
+		config.OffsetValue = lastOffset
 	} else {
 		config.OffsetMethod = cg.config.InitialOffsetMethod
 	}
@@ -386,7 +386,7 @@ partitionConsumerLoop:
 
 		case <-commitTicker.C:
 			if lastCommittedOffset < lastOffset {
-				if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+				if err := cg.zk.Commit(cg.name, topic, partition, lastOffset+1); err != nil {
 					cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
 				} else {
 					lastCommittedOffset = lastOffset
@@ -399,7 +399,7 @@ partitionConsumerLoop:
 	}
 
 	if lastCommittedOffset < lastOffset {
-		if err := cg.zk.Commit(cg.name, topic, partition, lastOffset); err != nil {
+		if err := cg.zk.Commit(cg.name, topic, partition, lastOffset+1); err != nil {
 			cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
 		} else {
 			cg.Logf("Committed offset %d for %s:%d\n", lastOffset, topic, partition)
