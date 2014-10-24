@@ -87,7 +87,7 @@ func (m *Monitor) ProcessingLag() (ConsumerGroupProcessingLag, error) {
 				return nil, err
 			}
 
-			eventsBehindLatest[topic][partition] = latestOffsetInt - currentOffsetInt - 1
+			eventsBehindLatest[topic][partition] = latestOffsetInt - currentOffsetInt
 		}
 	}
 	return eventsBehindLatest, nil
