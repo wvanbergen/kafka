@@ -255,9 +255,7 @@ func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions
 			t.Logf("Next offset for %s:%d = %d", topic, partition, nextOffset)
 		}
 
-		initialOffset := nextOffset - 1
-
-		if err := zk.Commit(consumerGroup, topic, partition, initialOffset); err != nil {
+		if err := zk.Commit(consumerGroup, topic, partition, nextOffset); err != nil {
 			t.Fatal(err)
 		}
 	}
