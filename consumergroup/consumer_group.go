@@ -377,19 +377,10 @@ partitionConsumerLoop:
 					lastOffset = event.Offset
 					continue partitionConsumerLoop
 
-				default:
-					nextAttemptAfter := time.After(100 * time.Millisecond)
-					select {
-					case <-stopper:
-						break partitionConsumerLoop
-					case <-nextAttemptAfter:
-						continue
-					}
+				case <-stopper:
+					break partitionConsumerLoop
 				}
 			}
-
-			err = errors.New("Failed to submit event to channel! You may need to run additional consumers to keep up.")
-			break partitionConsumerLoop
 
 		case <-commitTicker.C:
 			if lastCommittedOffset < lastOffset {
