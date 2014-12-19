@@ -186,6 +186,11 @@ func (cg *ConsumerGroup) Close() (err error) {
 		return AlreadyClosed
 	}
 
+	// Mark ConsumerGroup as closed BEFORE closing internal channels so other
+	// go routines do not try to close ConsumerGroup again (thus causing
+	// panic from closing channels twice).
+	cg.id = ""
+
 	defer cg.zk.Close()
 
 	close(cg.stopper)
@@ -202,7 +207,6 @@ func (cg *ConsumerGroup) Close() (err error) {
 	}
 
 	close(cg.events)
-	cg.id = ""
 	return
 }
 
