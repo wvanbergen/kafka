@@ -365,15 +365,12 @@ partitionConsumerLoop:
 	for {
 		select {
 		case event := <-partitionEvents:
-			if event.Err != nil {
-				err = event.Err
-				break partitionConsumerLoop
-			}
-
 			for {
 				select {
 				case events <- event:
-					lastOffset = event.Offset
+					if event.Err == nil {
+						lastOffset = event.Offset
+					}
 					continue partitionConsumerLoop
 
 				case <-stopper:
