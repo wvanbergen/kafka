@@ -370,11 +370,6 @@ partitionConsumerLoop:
 				break partitionConsumerLoop
 			}
 
-			if lastOffset != 0 && lastOffset+1 != event.Offset {
-				err = fmt.Errorf("Expected offset %d, got %d!", lastOffset, event.Offset)
-				break partitionConsumerLoop
-			}
-
 			for {
 				select {
 				case events <- event:
