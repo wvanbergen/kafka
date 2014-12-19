@@ -357,10 +357,10 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	commitTicker := time.NewTicker(cg.config.CommitInterval)
 	defer commitTicker.Stop()
 
-	var lastCommittedOffset int64
+	var lastCommittedOffset int64 = -1		// aka unknown
 
 	err = nil
-	var lastOffset int64
+	var lastOffset int64 = -1				// aka unknown
 partitionConsumerLoop:
 	for {
 		select {
