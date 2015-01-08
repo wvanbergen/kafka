@@ -186,6 +186,11 @@ func (cg *ConsumerGroup) Close() (err error) {
 		return AlreadyClosed
 	}
 
+	// Mark ConsumerGroup as closed BEFORE closing internal channels so other
+	// go routines do not try to close ConsumerGroup again (thus causing
+	// panic from closing channels twice).
+	cg.id = ""
+
 	defer cg.zk.Close()
 
 	close(cg.stopper)
@@ -202,7 +207,6 @@ func (cg *ConsumerGroup) Close() (err error) {
 	}
 
 	close(cg.events)
-	cg.id = ""
 	return
 }
 
@@ -353,28 +357,20 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	commitTicker := time.NewTicker(cg.config.CommitInterval)
 	defer commitTicker.Stop()
 
-	var lastCommittedOffset int64
+	var lastCommittedOffset int64 = -1		// aka unknown
 
 	err = nil
-	var lastOffset int64
+	var lastOffset int64 = -1				// aka unknown
 partitionConsumerLoop:
 	for {
 		select {
 		case event := <-partitionEvents:
-			if event.Err != nil {
-				err = event.Err
-				break partitionConsumerLoop
-			}
-
-			if lastOffset != 0 && lastOffset+1 != event.Offset {
-				err = fmt.Errorf("Expected offset %d, got %d!", lastOffset, event.Offset)
-				break partitionConsumerLoop
-			}
-
 			for {
 				select {
 				case events <- event:
-					lastOffset = event.Offset
+					if event.Err == nil {
+						lastOffset = event.Offset
+					}
 					continue partitionConsumerLoop
 
 				case <-stopper:
