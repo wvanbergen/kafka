@@ -217,14 +217,14 @@ func produceEvents(t *testing.T, consumerGroup string, topic string, amount int6
 	client := saramaClient(fmt.Sprintf("%s-%s", consumerGroup, "producer"))
 	defer client.Close()
 
-	producer, err := sarama.NewSimpleProducer(client, topic, nil)
+	producer, err := sarama.NewSimpleProducer(client, nil)
 	if err != nil {
 		return err
 	}
 	defer producer.Close()
 
 	for i := int64(1); i <= amount; i++ {
-		err = producer.SendMessage(nil, sarama.StringEncoder(fmt.Sprintf("testing %d", i)))
+		err = producer.SendMessage(topic, nil, sarama.StringEncoder(fmt.Sprintf("testing %d", i)))
 
 		if err != nil {
 			return err
