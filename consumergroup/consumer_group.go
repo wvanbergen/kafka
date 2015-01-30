@@ -331,10 +331,8 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		panic(err)
 	}
 
-	var config *sarama.ConsumerConfig
-	if cg.config.KafkaConsumerConfig == nil {
-		config = sarama.NewConsumerConfig()
-	} else {
+	config := sarama.NewConsumerConfig()
+	if cg.config.KafkaConsumerConfig != nil {
 		*config = *cg.config.KafkaConsumerConfig
 	}
 
