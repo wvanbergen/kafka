@@ -78,8 +78,9 @@ type ConsumerGroup struct {
 
 	config *ConsumerGroupConfig
 
-	client *sarama.Client
-	zk     *ZK
+	client   *sarama.Client
+	consumer *sarama.Consumer
+	zk       *ZK
 
 	wg sync.WaitGroup
 
@@ -137,20 +138,26 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 	var consumerID string
 	consumerID, err = generateConsumerID()
+	var consumer *sarama.Consumer
+	if consumer, err = sarama.NewConsumer(client, config.KafkaConsumerConfig); err != nil {
+		return
+	}
+
 	if err != nil {
 		return
 	}
 
 	cg = &ConsumerGroup{
-		id:      consumerID,
-		name:    name,
-		config:  config,
-		brokers: brokers,
-		client:  client,
-		zk:      zk,
-		events:  make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
-		stopper: make(chan struct{}),
-		offsets: make(map[string]map[int32]int64),
+		id:       consumerID,
+		name:     name,
+		config:   config,
+		brokers:  brokers,
+		client:   client,
+		consumer: consumer,
+		zk:       zk,
+		events:   make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
+		stopper:  make(chan struct{}),
+		offsets:  make(map[string]map[int32]int64),
 	}
 
 	// Register consumer group
@@ -331,11 +338,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		panic(err)
 	}
 
-	config := sarama.NewConsumerConfig()
-	if cg.config.KafkaConsumerConfig != nil {
-		*config = *cg.config.KafkaConsumerConfig
-	}
-
+	config := sarama.NewPartitionConsumerConfig()
 	if nextOffset > 0 {
 		config.OffsetMethod = sarama.OffsetMethodManual
 		config.OffsetValue = nextOffset
@@ -343,7 +346,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		config.OffsetMethod = cg.config.InitialOffsetMethod
 	}
 
-	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, config)
+	consumer, err := cg.consumer.ConsumePartition(topic, partition, config)
 	if err != nil {
 		panic(err)
 	}
@@ -355,10 +358,10 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	commitTicker := time.NewTicker(cg.config.CommitInterval)
 	defer commitTicker.Stop()
 
-	var lastCommittedOffset int64 = -1		// aka unknown
+	var lastCommittedOffset int64 = -1 // aka unknown
 
 	err = nil
-	var lastOffset int64 = -1				// aka unknown
+	var lastOffset int64 = -1 // aka unknown
 partitionConsumerLoop:
 	for {
 		select {
