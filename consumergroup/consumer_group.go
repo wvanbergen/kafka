@@ -332,26 +332,32 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	}
 
 	config := sarama.NewConsumerConfig()
+	part_config := sarama.NewPartitionConsumerConfig()
 	if cg.config.KafkaConsumerConfig != nil {
 		*config = *cg.config.KafkaConsumerConfig
 	}
 
 	if nextOffset > 0 {
-		config.OffsetMethod = sarama.OffsetMethodManual
-		config.OffsetValue = nextOffset
+		part_config.OffsetMethod = sarama.OffsetMethodManual
+		part_config.OffsetValue = nextOffset
 	} else {
-		config.OffsetMethod = cg.config.InitialOffsetMethod
+		part_config.OffsetMethod = cg.config.InitialOffsetMethod
 	}
 
-	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, config)
+    consumer, err := sarama.NewConsumer(cg.client, config)
 	if err != nil {
 		panic(err)
 	}
-	defer consumer.Close()
+	part_consumer, err := consumer.ConsumePartition(topic, partition, part_config)
+	//part_consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, config)
+	if err != nil {
+		panic(err)
+	}
+	defer part_consumer.Close()
 
 	cg.Logf("Started partition consumer for %s:%d at offset %d.\n", topic, partition, nextOffset)
 
-	partitionEvents := consumer.Events()
+	partitionEvents := part_consumer.Events()
 	commitTicker := time.NewTicker(cg.config.CommitInterval)
 	defer commitTicker.Stop()
 
