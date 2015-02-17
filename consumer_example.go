@@ -41,9 +41,9 @@ func init() {
 }
 
 func main() {
-	config := sarama.NewConsumerConfig()
-	config.OffsetMethod = sarama.OffsetMethodNewest
-	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, nil)
+	config := consumergroup.NewConsumerGroupConfig()
+	config.InitialOffsetMethod = sarama.OffsetMethodNewest
+	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, config)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
 	}

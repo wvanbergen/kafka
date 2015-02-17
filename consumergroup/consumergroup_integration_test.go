@@ -11,6 +11,11 @@ import (
 	"github.com/Shopify/sarama"
 )
 
+const (
+	TopicWithSinglePartition    = "consumergroup.single"
+	TopicWithMultiplePartitions = "consumergroup.multi"
+)
+
 var (
 	zookeeper []string = []string{"localhost:2181"}
 )
@@ -22,7 +27,7 @@ var (
 func ExampleConsumerGroup() {
 	consumer, consumerErr := JoinConsumerGroup(
 		"ExampleConsumerGroup",
-		[]string{"single_partition", "multi_partition"},
+		[]string{TopicWithSinglePartition, TopicWithMultiplePartitions},
 		[]string{"localhost:2181"},
 		nil)
 
@@ -59,14 +64,14 @@ func ExampleConsumerGroup() {
 
 func TestIntegrationMultipleTopicsSingleConsumer(t *testing.T) {
 	consumerGroup := "TestIntegrationMultipleTopicsSingleConsumer"
-	setupZookeeper(t, consumerGroup, "single_partition", 1)
-	setupZookeeper(t, consumerGroup, "multi_partition", 2)
+	setupZookeeper(t, consumerGroup, TopicWithSinglePartition, 1)
+	setupZookeeper(t, consumerGroup, TopicWithMultiplePartitions, 4)
 
 	// Produce 100 events that we will consume
-	go produceEvents(t, consumerGroup, "single_partition", 100)
-	go produceEvents(t, consumerGroup, "multi_partition", 200)
+	go produceEvents(t, consumerGroup, TopicWithSinglePartition, 100)
+	go produceEvents(t, consumerGroup, TopicWithMultiplePartitions, 200)
 
-	consumer, err := JoinConsumerGroup(consumerGroup, []string{"single_partition", "multi_partition"}, zookeeper, nil)
+	consumer, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition, TopicWithMultiplePartitions}, zookeeper, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,16 +83,16 @@ func TestIntegrationMultipleTopicsSingleConsumer(t *testing.T) {
 
 func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 	consumerGroup := "TestIntegrationSingleTopicParallelConsumers"
-	setupZookeeper(t, consumerGroup, "multi_partition", 2)
-	go produceEvents(t, consumerGroup, "multi_partition", 200)
+	setupZookeeper(t, consumerGroup, TopicWithMultiplePartitions, 4)
+	go produceEvents(t, consumerGroup, TopicWithMultiplePartitions, 200)
 
-	consumer1, err := JoinConsumerGroup(consumerGroup, []string{"multi_partition"}, zookeeper, nil)
+	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeper, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer consumer1.Close()
 
-	consumer2, err := JoinConsumerGroup(consumerGroup, []string{"multi_partition"}, zookeeper, nil)
+	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeper, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +142,8 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 
 func TestSingleTopicSequentialConsumer(t *testing.T) {
 	consumerGroup := "TestSingleTopicSequentialConsumer"
-	setupZookeeper(t, consumerGroup, "single_partition", 1)
-	go produceEvents(t, consumerGroup, "single_partition", 20)
+	setupZookeeper(t, consumerGroup, TopicWithSinglePartition, 1)
+	go produceEvents(t, consumerGroup, TopicWithSinglePartition, 20)
 
 	offsets := make(OffsetMap)
 
@@ -148,7 +153,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	config := NewConsumerGroupConfig()
 	config.ChannelBufferSize = 0
 
-	consumer1, err := JoinConsumerGroup(consumerGroup, []string{"single_partition"}, zookeeper, config)
+	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeper, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +162,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	assertEvents(t, consumer1.Events(), 10, offsets)
 	consumer1.Close()
 
-	consumer2, err := JoinConsumerGroup(consumerGroup, []string{"single_partition"}, zookeeper, nil)
+	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeper, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	AlreadyClosed          = errors.New("Already closed consumer")
+	AlreadyClosing         = errors.New("The consumer group is already shutting down.")
 	FailedToClaimPartition = errors.New("Failed to claim partition for this consumer instance. Do you have a rogue consumer running?")
 )
 
@@ -78,10 +78,12 @@ type ConsumerGroup struct {
 
 	config *ConsumerGroupConfig
 
-	client *sarama.Client
-	zk     *ZK
+	client   *sarama.Client
+	consumer *sarama.Consumer
+	zk       *ZK
 
-	wg sync.WaitGroup
+	wg             sync.WaitGroup
+	singleShutdown sync.Once
 
 	events  chan *sarama.ConsumerEvent
 	stopper chan struct{}
@@ -122,6 +124,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 	brokers, err := zk.Brokers()
 	if err != nil {
+		zk.Close()
 		return
 	}
 
@@ -132,25 +135,36 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 	var client *sarama.Client
 	if client, err = sarama.NewClient(name, brokerList, config.KafkaClientConfig); err != nil {
+		zk.Close()
+		return
+	}
+
+	var consumer *sarama.Consumer
+	if consumer, err = sarama.NewConsumer(client, config.KafkaConsumerConfig); err != nil {
+		client.Close()
+		zk.Close()
 		return
 	}
 
 	var consumerID string
 	consumerID, err = generateConsumerID()
 	if err != nil {
+		client.Close()
+		zk.Close()
 		return
 	}
 
 	cg = &ConsumerGroup{
-		id:      consumerID,
-		name:    name,
-		config:  config,
-		brokers: brokers,
-		client:  client,
-		zk:      zk,
-		events:  make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
-		stopper: make(chan struct{}),
-		offsets: make(map[string]map[int32]int64),
+		id:       consumerID,
+		name:     name,
+		config:   config,
+		brokers:  brokers,
+		client:   client,
+		consumer: consumer,
+		zk:       zk,
+		events:   make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
+		stopper:  make(chan struct{}),
+		offsets:  make(map[string]map[int32]int64),
 	}
 
 	// Register consumer group
@@ -181,33 +195,32 @@ func (cg *ConsumerGroup) Closed() bool {
 	return cg.id == ""
 }
 
-func (cg *ConsumerGroup) Close() (err error) {
-	if cg.Closed() {
-		return AlreadyClosed
-	}
+func (cg *ConsumerGroup) Close() error {
+	shutdownError := AlreadyClosing
+	cg.singleShutdown.Do(func() {
+		defer cg.zk.Close()
 
-	// Mark ConsumerGroup as closed BEFORE closing internal channels so other
-	// go routines do not try to close ConsumerGroup again (thus causing
-	// panic from closing channels twice).
-	cg.id = ""
+		shutdownError = nil
 
-	defer cg.zk.Close()
+		close(cg.stopper)
+		cg.wg.Wait()
 
-	close(cg.stopper)
-	cg.wg.Wait()
+		if shutdownError = cg.zk.DeregisterConsumer(cg.name, cg.id); shutdownError != nil {
+			cg.Logf("FAILED deregistering consumer: %s!\n", shutdownError)
+		} else {
+			cg.Logf("Deregistered consumer.\n")
+		}
 
-	if err = cg.client.Close(); err != nil {
-		cg.Logf("FAILED closing the Sarama client!\n")
-	}
+		if shutdownError = cg.client.Close(); shutdownError != nil {
+			cg.Logf("FAILED closing the Sarama client: %s\n", shutdownError)
+		}
 
-	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
-		cg.Logf("FAILED deregistering consumer!\n")
-	} else {
-		cg.Logf("Deregistered consumer.\n")
-	}
+		close(cg.events)
+		cg.id = ""
 
-	close(cg.events)
-	return
+	})
+
+	return shutdownError
 }
 
 func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
@@ -331,11 +344,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		panic(err)
 	}
 
-	config := sarama.NewConsumerConfig()
-	if cg.config.KafkaConsumerConfig != nil {
-		*config = *cg.config.KafkaConsumerConfig
-	}
-
+	config := sarama.NewPartitionConsumerConfig()
 	if nextOffset > 0 {
 		config.OffsetMethod = sarama.OffsetMethodManual
 		config.OffsetValue = nextOffset
@@ -343,7 +352,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		config.OffsetMethod = cg.config.InitialOffsetMethod
 	}
 
-	consumer, err := sarama.NewConsumer(cg.client, topic, partition, cg.name, config)
+	consumer, err := cg.consumer.ConsumePartition(topic, partition, config)
 	if err != nil {
 		panic(err)
 	}
@@ -355,10 +364,10 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	commitTicker := time.NewTicker(cg.config.CommitInterval)
 	defer commitTicker.Stop()
 
-	var lastCommittedOffset int64 = -1		// aka unknown
+	var lastCommittedOffset int64 = -1 // aka unknown
 
 	err = nil
-	var lastOffset int64 = -1				// aka unknown
+	var lastOffset int64 = -1 // aka unknown
 partitionConsumerLoop:
 	for {
 		select {
