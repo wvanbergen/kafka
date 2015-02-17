@@ -34,7 +34,7 @@ func NewConsumerGroupConfig() *ConsumerGroupConfig {
 	return &ConsumerGroupConfig{
 		ZookeeperTimeout:    1 * time.Second,
 		ChannelBufferSize:   256,
-		CommitInterval:      10 * time.Second,
+		CommitInterval:      5 * time.Second,
 		InitialOffsetMethod: sarama.OffsetMethodOldest,
 	}
 }
@@ -86,11 +86,14 @@ type ConsumerGroup struct {
 	singleShutdown sync.Once
 
 	events  chan *sarama.ConsumerEvent
+	acks    chan *sarama.ConsumerEvent
 	stopper chan struct{}
 
 	brokers   map[int]string
 	consumers []string
-	offsets   map[string]map[int32]int64
+
+	offsets     map[string]map[int32]int64
+	offsetsLock sync.Mutex
 }
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
@@ -163,6 +166,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		consumer: consumer,
 		zk:       zk,
 		events:   make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
+		acks:     make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
 		stopper:  make(chan struct{}),
 		offsets:  make(map[string]map[int32]int64),
 	}
@@ -181,6 +185,8 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		cg.Logf("Consumer instance registered (%s).", cg.id)
 	}
 
+	go cg.offsetCollector()
+	go cg.offsetCommitter()
 	go cg.topicListConsumer(topics)
 
 	return
@@ -189,6 +195,10 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 // Returns a channel that you can read to obtain events from Kafka to process.
 func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
 	return cg.events
+}
+
+func (cg *ConsumerGroup) Ack() chan<- *sarama.ConsumerEvent {
+	return cg.acks
 }
 
 func (cg *ConsumerGroup) Closed() bool {
@@ -231,6 +241,73 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 		identifier = cg.id[len(cg.id)-12:]
 	}
 	sarama.Logger.Printf("[%s/%s] %s", cg.name, identifier, fmt.Sprintf(format, args...))
+}
+
+func (cg *ConsumerGroup) offsetCommitter() {
+	defer cg.closeOnPanic()
+	defer cg.commitOffsets()
+
+	commitTicker := time.NewTicker(cg.config.CommitInterval)
+	defer commitTicker.Stop()
+
+	for {
+		select {
+		case <-cg.stopper:
+			return
+		case <-commitTicker.C:
+			cg.commitOffsets()
+		}
+	}
+}
+
+func (cg *ConsumerGroup) commitOffsets() {
+	cg.offsetsLock.Lock()
+	defer cg.offsetsLock.Unlock()
+
+	cg.Logf("Comitting offsets to ZK...\n")
+	for topic, partitionOffsets := range cg.offsets {
+		for partition, offset := range partitionOffsets {
+			if offset > 0 {
+				if err := cg.zk.Commit(cg.name, topic, partition, offset+1); err != nil {
+					cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
+				} else {
+					delete(partitionOffsets, partition)
+					cg.Logf("Committed offset %d for %s:%d\n", offset, topic, partition)
+				}
+			}
+		}
+	}
+}
+
+func (cg *ConsumerGroup) offsetCollector() {
+	defer cg.closeOnPanic()
+
+	for {
+		select {
+		case <-cg.stopper:
+			return
+
+		case event := <-cg.acks:
+			if event.Err != nil {
+				// You should not ack errors, will ignore for now
+				continue
+			}
+			cg.updateOffset(event)
+		}
+	}
+}
+
+func (cg *ConsumerGroup) updateOffset(event *sarama.ConsumerEvent) {
+	cg.offsetsLock.Lock()
+	defer cg.offsetsLock.Unlock()
+
+	if cg.offsets[event.Topic] == nil {
+		cg.offsets[event.Topic] = make(map[int32]int64)
+	}
+
+	if event.Offset > cg.offsets[event.Topic][event.Partition] {
+		cg.offsets[event.Topic][event.Partition] = event.Offset
+	}
 }
 
 func (cg *ConsumerGroup) closeOnPanic() {
@@ -361,10 +438,6 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	cg.Logf("Started partition consumer for %s:%d at offset %d.\n", topic, partition, nextOffset)
 
 	partitionEvents := consumer.Events()
-	commitTicker := time.NewTicker(cg.config.CommitInterval)
-	defer commitTicker.Stop()
-
-	var lastCommittedOffset int64 = -1 // aka unknown
 
 	err = nil
 	var lastOffset int64 = -1 // aka unknown
@@ -385,25 +458,8 @@ partitionConsumerLoop:
 				}
 			}
 
-		case <-commitTicker.C:
-			if lastCommittedOffset < lastOffset {
-				if err := cg.zk.Commit(cg.name, topic, partition, lastOffset+1); err != nil {
-					cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
-				} else {
-					lastCommittedOffset = lastOffset
-				}
-			}
-
 		case <-stopper:
 			break partitionConsumerLoop
-		}
-	}
-
-	if lastCommittedOffset < lastOffset {
-		if err := cg.zk.Commit(cg.name, topic, partition, lastOffset+1); err != nil {
-			cg.Logf("Failed to commit offset for %s:%d\n", topic, partition)
-		} else {
-			cg.Logf("Committed offset %d for %s:%d\n", lastOffset, topic, partition)
 		}
 	}
 

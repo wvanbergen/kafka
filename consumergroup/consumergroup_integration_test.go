@@ -53,6 +53,9 @@ func ExampleConsumerGroup() {
 		// Process event
 		log.Println(string(event.Value))
 		eventCount += 1
+
+		// Ack event
+		consumer.Ack() <- event
 	}
 
 	log.Printf("Processed %d events.", eventCount)
@@ -78,7 +81,7 @@ func TestIntegrationMultipleTopicsSingleConsumer(t *testing.T) {
 	defer consumer.Close()
 
 	var offsets = make(OffsetMap)
-	assertEvents(t, consumer.Events(), 300, offsets)
+	assertEvents(t, consumer, 300, offsets)
 }
 
 func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
@@ -159,7 +162,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	}
 	defer consumer1.Close()
 
-	assertEvents(t, consumer1.Events(), 10, offsets)
+	assertEvents(t, consumer1, 10, offsets)
 	consumer1.Close()
 
 	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeper, nil)
@@ -168,7 +171,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	}
 	defer consumer2.Close()
 
-	assertEvents(t, consumer2.Events(), 10, offsets)
+	assertEvents(t, consumer2, 10, offsets)
 	consumer2.Close()
 }
 
@@ -178,14 +181,14 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 
 type OffsetMap map[string]map[int32]int64
 
-func assertEvents(t *testing.T, stream <-chan *sarama.ConsumerEvent, count int64, offsets OffsetMap) {
+func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMap) {
 	var processed int64
 	for processed < count {
 		select {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("Reader timeout after %d events!", processed)
 
-		case event, ok := <-stream:
+		case event, ok := <-cg.Events():
 			if !ok {
 				t.Fatal("Event stream closed prematurely")
 			} else if event.Err != nil {
@@ -200,8 +203,8 @@ func assertEvents(t *testing.T, stream <-chan *sarama.ConsumerEvent, count int64
 					t.Fatalf("Unexpected offset on %s:%d. Expected %d, got %d.", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset)
 				}
 
+				cg.Ack() <- event
 				processed += 1
-
 				offsets[event.Topic][event.Partition] = event.Offset
 			}
 
