@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	AlreadyClosed          = errors.New("Already closed consumer")
+	AlreadyClosing         = errors.New("The consumer group is already shutting down.")
 	FailedToClaimPartition = errors.New("Failed to claim partition for this consumer instance. Do you have a rogue consumer running?")
 )
 
@@ -82,7 +82,8 @@ type ConsumerGroup struct {
 	consumer *sarama.Consumer
 	zk       *ZK
 
-	wg sync.WaitGroup
+	wg             sync.WaitGroup
+	singleShutdown sync.Once
 
 	events  chan *sarama.ConsumerEvent
 	stopper chan struct{}
@@ -123,6 +124,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 	brokers, err := zk.Brokers()
 	if err != nil {
+		zk.Close()
 		return
 	}
 
@@ -133,17 +135,22 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 	var client *sarama.Client
 	if client, err = sarama.NewClient(name, brokerList, config.KafkaClientConfig); err != nil {
+		zk.Close()
+		return
+	}
+
+	var consumer *sarama.Consumer
+	if consumer, err = sarama.NewConsumer(client, config.KafkaConsumerConfig); err != nil {
+		client.Close()
+		zk.Close()
 		return
 	}
 
 	var consumerID string
 	consumerID, err = generateConsumerID()
-	var consumer *sarama.Consumer
-	if consumer, err = sarama.NewConsumer(client, config.KafkaConsumerConfig); err != nil {
-		return
-	}
-
 	if err != nil {
+		client.Close()
+		zk.Close()
 		return
 	}
 
@@ -188,33 +195,32 @@ func (cg *ConsumerGroup) Closed() bool {
 	return cg.id == ""
 }
 
-func (cg *ConsumerGroup) Close() (err error) {
-	if cg.Closed() {
-		return AlreadyClosed
-	}
+func (cg *ConsumerGroup) Close() error {
+	shutdownError := AlreadyClosing
+	cg.singleShutdown.Do(func() {
+		defer cg.zk.Close()
 
-	// Mark ConsumerGroup as closed BEFORE closing internal channels so other
-	// go routines do not try to close ConsumerGroup again (thus causing
-	// panic from closing channels twice).
-	cg.id = ""
+		shutdownError = nil
 
-	defer cg.zk.Close()
+		close(cg.stopper)
+		cg.wg.Wait()
 
-	close(cg.stopper)
-	cg.wg.Wait()
+		if shutdownError = cg.zk.DeregisterConsumer(cg.name, cg.id); shutdownError != nil {
+			cg.Logf("FAILED deregistering consumer: %s!\n", shutdownError)
+		} else {
+			cg.Logf("Deregistered consumer.\n")
+		}
 
-	if err = cg.client.Close(); err != nil {
-		cg.Logf("FAILED closing the Sarama client!\n")
-	}
+		if shutdownError = cg.client.Close(); shutdownError != nil {
+			cg.Logf("FAILED closing the Sarama client: %s\n", shutdownError)
+		}
 
-	if err = cg.zk.DeregisterConsumer(cg.name, cg.id); err != nil {
-		cg.Logf("FAILED deregistering consumer!\n")
-	} else {
-		cg.Logf("Deregistered consumer.\n")
-	}
+		close(cg.events)
+		cg.id = ""
 
-	close(cg.events)
-	return
+	})
+
+	return shutdownError
 }
 
 func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
