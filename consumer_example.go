@@ -77,7 +77,7 @@ func main() {
 		}
 
 		offsets[event.Topic][event.Partition] = event.Offset
-		consumer.Ack() <- event
+		consumer.CommitUpto(event)
 	}
 
 	log.Printf("Processed %d events.", eventCount)

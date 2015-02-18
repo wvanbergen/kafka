@@ -55,7 +55,7 @@ func ExampleConsumerGroup() {
 		eventCount += 1
 
 		// Ack event
-		consumer.Ack() <- event
+		consumer.CommitUpto(event)
 	}
 
 	log.Printf("Processed %d events.", eventCount)
@@ -129,10 +129,12 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 		case event1, ok1 := <-events1:
 			handleEvent(event1, ok1)
 			eventCount1 += 1
+			consumer1.CommitUpto(event1)
 
 		case event2, ok2 := <-events2:
 			handleEvent(event2, ok2)
 			eventCount2 += 1
+			consumer2.CommitUpto(event2)
 		}
 	}
 
@@ -144,6 +146,8 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 }
 
 func TestSingleTopicSequentialConsumer(t *testing.T) {
+	sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+
 	consumerGroup := "TestSingleTopicSequentialConsumer"
 	setupZookeeper(t, consumerGroup, TopicWithSinglePartition, 1)
 	go produceEvents(t, consumerGroup, TopicWithSinglePartition, 20)
@@ -160,7 +164,6 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer consumer1.Close()
 
 	assertEvents(t, consumer1, 10, offsets)
 	consumer1.Close()
@@ -169,7 +172,6 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer consumer2.Close()
 
 	assertEvents(t, consumer2, 10, offsets)
 	consumer2.Close()
@@ -203,9 +205,9 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 					t.Fatalf("Unexpected offset on %s:%d. Expected %d, got %d.", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset)
 				}
 
-				cg.Ack() <- event
 				processed += 1
 				offsets[event.Topic][event.Partition] = event.Offset
+				cg.CommitUpto(event)
 			}
 
 		}

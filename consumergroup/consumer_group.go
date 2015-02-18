@@ -197,10 +197,6 @@ func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
 	return cg.events
 }
 
-func (cg *ConsumerGroup) Ack() chan<- *sarama.ConsumerEvent {
-	return cg.acks
-}
-
 func (cg *ConsumerGroup) Closed() bool {
 	return cg.id == ""
 }
@@ -241,6 +237,11 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 		identifier = cg.id[len(cg.id)-12:]
 	}
 	sarama.Logger.Printf("[%s/%s] %s", cg.name, identifier, fmt.Sprintf(format, args...))
+}
+
+func (cg *ConsumerGroup) CommitUpto(event *sarama.ConsumerEvent) error {
+	cg.acks <- event
+	return nil
 }
 
 func (cg *ConsumerGroup) offsetCommitter() {
