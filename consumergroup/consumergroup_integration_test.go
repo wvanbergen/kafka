@@ -146,8 +146,6 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 }
 
 func TestSingleTopicSequentialConsumer(t *testing.T) {
-	sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
-
 	consumerGroup := "TestSingleTopicSequentialConsumer"
 	setupZookeeper(t, consumerGroup, TopicWithSinglePartition, 1)
 	go produceEvents(t, consumerGroup, TopicWithSinglePartition, 20)
