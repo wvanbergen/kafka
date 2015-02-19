@@ -244,7 +244,7 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 }
 
 func (cg *ConsumerGroup) CommitUpto(event *sarama.ConsumerEvent) error {
-	cg.offsetManager.MarkAsSeen(event.Topic, event.Partition, event.Offset)
+	cg.offsetManager.MarkAsProcessed(event.Topic, event.Partition, event.Offset)
 	return nil
 }
 

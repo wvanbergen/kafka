@@ -7,13 +7,23 @@ import (
 
 type OffsetManager interface {
 	InitializePartition(topic string, partition int32) (int64, error)
-	MarkAsSeen(topic string, partition int32, offset int64) bool
+	MarkAsProcessed(topic string, partition int32, offset int64) bool
 	Close() error
 }
 
 type OffsetManagerConfig struct {
 	CommitInterval time.Duration
 	VerboseLogging bool
+type (
+	topicOffsets    map[int32]*partitionOffsetTracker
+	offsetsMap      map[string]topicOffsets
+	offsetCommitter func(int64) error
+)
+
+type partitionOffsetTracker struct {
+	l                      sync.Mutex
+	highestProcessedOffset int64
+	lastCommittedOffset    int64
 }
 
 type zookeeperOffsetManager struct {
@@ -43,12 +53,6 @@ func NewZookeeperOffsetManager(cg *ConsumerGroup, config *OffsetManagerConfig) O
 	return zom
 }
 
-func (zom *zookeeperOffsetManager) MarkAsSeen(topic string, partition int32, offset int64) bool {
-	zom.l.RLock()
-	defer zom.l.RUnlock()
-	return zom.offsets[topic][partition].MarkAsSeen(offset)
-}
-
 func (zom *zookeeperOffsetManager) InitializePartition(topic string, partition int32) (int64, error) {
 	zom.l.Lock()
 	defer zom.l.Unlock()
@@ -59,11 +63,21 @@ func (zom *zookeeperOffsetManager) InitializePartition(topic string, partition i
 
 	nextOffset, err := zom.cg.zk.Offset(zom.cg.name, topic, partition)
 	if err != nil {
-		return -1, err
+		return 0, err
 	}
-	zom.offsets[topic][partition] = newPartitionOffsetTracker(nextOffset - 1)
+
+	zom.offsets[topic][partition] = &partitionOffsetTracker{
+		highestProcessedOffset: nextOffset - 1,
+		lastCommittedOffset:    nextOffset - 1,
+	}
 
 	return nextOffset, nil
+}
+
+func (zom *zookeeperOffsetManager) MarkAsProcessed(topic string, partition int32, offset int64) bool {
+	zom.l.RLock()
+	defer zom.l.RUnlock()
+	return zom.offsets[topic][partition].markAsProcessed(offset)
 }
 
 func (zom *zookeeperOffsetManager) Close() error {
@@ -98,57 +112,47 @@ func (zom *zookeeperOffsetManager) commitOffsets() error {
 				return zom.cg.zk.Commit(zom.cg.name, topic, partition, offset+1)
 			}
 
-			err := offsetTracker.Commit(committer)
+			err := offsetTracker.commit(committer)
 			switch err {
 			case nil:
 				if zom.config.VerboseLogging {
-					zom.cg.Logf("Committed offset %d for %s:%d\n", offsetTracker.highestOffsetSeen, topic, partition)
+					zom.cg.Logf("Committed offset %d for %s:%d\n", offsetTracker.highestProcessedOffset, topic, partition)
 				}
 			case AlreadyCommitted:
 				// noop
 			default:
 				returnErr = err
-				zom.cg.Logf("Failed to commit offset %d for %s:%d\n", offsetTracker.highestOffsetSeen, topic, partition)
+				zom.cg.Logf("Failed to commit offset %d for %s:%d\n", offsetTracker.highestProcessedOffset, topic, partition)
 			}
 		}
 	}
 	return returnErr
 }
 
-type offsetCommitter func(int64) error
-type topicOffsets map[int32]*partitionOffsetTracker
-type offsetsMap map[string]topicOffsets
-
-type partitionOffsetTracker struct {
-	l                   sync.Mutex
-	highestOffsetSeen   int64
-	lastCommittedOffset int64
-}
-
-func newPartitionOffsetTracker(lastCommittedOffset int64) *partitionOffsetTracker {
-	return &partitionOffsetTracker{lastCommittedOffset: lastCommittedOffset}
-}
-
-func (pot *partitionOffsetTracker) MarkAsSeen(offset int64) bool {
+// MarkAsProcessed marks the provided offset as highest processed offset if
+// it's higehr than any previous offset it has received.
+func (pot *partitionOffsetTracker) markAsProcessed(offset int64) bool {
 	pot.l.Lock()
 	defer pot.l.Unlock()
-	if offset > pot.highestOffsetSeen {
-		pot.highestOffsetSeen = offset
+	if offset > pot.highestProcessedOffset {
+		pot.highestProcessedOffset = offset
 		return true
 	} else {
 		return false
 	}
 }
 
-func (pot *partitionOffsetTracker) Commit(committer offsetCommitter) error {
+func (pot *partitionOffsetTracker) commit(committer offsetCommitter) error {
 	pot.l.Lock()
 	defer pot.l.Unlock()
 
-	if pot.highestOffsetSeen > pot.lastCommittedOffset {
-		if err := committer(pot.highestOffsetSeen); err != nil {
+	if pot.highestProcessedOffset > pot.lastCommittedOffset {
+		if err := committer(pot.highestProcessedOffset); err != nil {
 			return err
 		}
-		pot.lastCommittedOffset = pot.highestOffsetSeen
+		pot.lastCommittedOffset = pot.highestProcessedOffset
+		return nil
+	} else {
+		return AlreadyCommitted
 	}
-	return nil
 }
