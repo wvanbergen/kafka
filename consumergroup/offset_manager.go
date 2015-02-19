@@ -5,15 +5,45 @@ import (
 	"time"
 )
 
+// OffsetManager is the main interface consumergroup requires to manage offsets of the consumergroup.
 type OffsetManager interface {
+
+	// InitializePartition is called when the consumergroup is starting to consume a
+	// partition. It should return the last processed offset for this partition. Note:
+	// the same partition can be initialized multiple times during a single run of a
+	// consumer group due to other consumer instances coming online and offline.
 	InitializePartition(topic string, partition int32) (int64, error)
+
+	// MarkAsProcessed tells the offset manager than a certain message has been successfully
+	// processed by the consumer, and should be committed. The implementation does not have
+	// to store this offset right away, but should return true if it intends to do this at
+	// some point.
+	//
+	// Offsets should generally be increasing if the consumer
+	// processes events serially, but this cannot be guaranteed if the consumer does any
+	// asynchronous processing. This can be handled in various ways, e.g. by only accepting
+	// offsets that are higehr than the offsets seen before for the same partition.
 	MarkAsProcessed(topic string, partition int32, offset int64) bool
+
+	// Close is called when the consumergroup is shutting down. It should try to commit
+	// all uncommitted offsets to the store. If this doesn't succeed, it should return
+	// an error.
 	Close() error
 }
 
+// OffsetManagerConfig holds configuration setting son how the offset manager should behave.
 type OffsetManagerConfig struct {
-	CommitInterval time.Duration
-	VerboseLogging bool
+	CommitInterval time.Duration // Interval between offset flushes to the backend store.
+	VerboseLogging bool          // Whether to enable verbose logging.
+}
+
+// NewOffsetManagerConfig returns a new OffsetManagerConfig with sane defaults.
+func NewOffsetManagerConfig() *OffsetManagerConfig {
+	return &OffsetManagerConfig{
+		CommitInterval: 10 * time.Second,
+	}
+}
+
 type (
 	topicOffsets    map[int32]*partitionOffsetTracker
 	offsetsMap      map[string]topicOffsets
@@ -35,9 +65,11 @@ type zookeeperOffsetManager struct {
 	closing, closed chan struct{}
 }
 
+// NewZookeeperOffsetManager returns an offset manager that uses Zookeeper
+// to store offsets.
 func NewZookeeperOffsetManager(cg *ConsumerGroup, config *OffsetManagerConfig) OffsetManager {
 	if config == nil {
-		config = &OffsetManagerConfig{CommitInterval: 10 * time.Second}
+		config = NewOffsetManagerConfig()
 	}
 
 	zom := &zookeeperOffsetManager{
@@ -142,6 +174,8 @@ func (pot *partitionOffsetTracker) markAsProcessed(offset int64) bool {
 	}
 }
 
+// Commit calls a committer function if the highest processed offset is out
+// of sync with the last committed offset.
 func (pot *partitionOffsetTracker) commit(committer offsetCommitter) error {
 	pot.l.Lock()
 	defer pot.l.Unlock()
