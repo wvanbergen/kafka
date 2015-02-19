@@ -35,7 +35,7 @@ func NewConsumerGroupConfig() *ConsumerGroupConfig {
 	return &ConsumerGroupConfig{
 		ZookeeperTimeout:    1 * time.Second,
 		ChannelBufferSize:   256,
-		CommitInterval:      5 * time.Second,
+		CommitInterval:      10 * time.Second,
 		InitialOffsetMethod: sarama.OffsetMethodOldest,
 	}
 }
@@ -72,42 +72,6 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 	return nil
 }
 
-type partitionOffsetTracker struct {
-	l                   sync.Mutex
-	highestOffsetSeen   int64
-	lastCommittedOffset int64
-}
-
-func newPartitionOffsetTracker(lastCommittedOffset int64) *partitionOffsetTracker {
-	return &partitionOffsetTracker{lastCommittedOffset: lastCommittedOffset}
-}
-
-func (pot *partitionOffsetTracker) MarkAsSeen(offset int64) {
-	pot.l.Lock()
-	defer pot.l.Unlock()
-	if offset > pot.highestOffsetSeen {
-		pot.highestOffsetSeen = offset
-	} else {
-		fmt.Println("Already marked as seen", offset)
-	}
-}
-
-func (pot *partitionOffsetTracker) Commit(committer offsetCommitter) error {
-	pot.l.Lock()
-	defer pot.l.Unlock()
-
-	if pot.highestOffsetSeen > pot.lastCommittedOffset {
-		if err := committer(pot.highestOffsetSeen); err != nil {
-			return err
-		}
-		pot.lastCommittedOffset = pot.highestOffsetSeen
-	}
-	return nil
-}
-
-type offsetCommitter func(int64) error
-type topicOffsets map[int32]*partitionOffsetTracker
-
 // The ConsumerGroup type holds all the information for a consumer that is part
 // of a consumer group. Call JoinConsumerGroup to start a consumer.
 type ConsumerGroup struct {
@@ -123,14 +87,12 @@ type ConsumerGroup struct {
 	singleShutdown sync.Once
 
 	events  chan *sarama.ConsumerEvent
-	acks    chan *sarama.ConsumerEvent
 	stopper chan struct{}
 
 	brokers   map[int]string
 	consumers []string
 
-	offsets     map[string]topicOffsets
-	offsetsLock sync.RWMutex
+	offsetManager OffsetManager
 }
 
 // Connects to a consumer group, using Zookeeper for auto-discovery
@@ -203,9 +165,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		consumer: consumer,
 		zk:       zk,
 		events:   make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
-		acks:     make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
 		stopper:  make(chan struct{}),
-		offsets:  make(map[string]topicOffsets),
 	}
 
 	// Register consumer group
@@ -222,8 +182,9 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		cg.Logf("Consumer instance registered (%s).", cg.id)
 	}
 
-	go cg.offsetCollector()
-	go cg.offsetCommitter()
+	offsetConfig := OffsetManagerConfig{CommitInterval: config.CommitInterval}
+	cg.offsetManager = NewZookeeperOffsetManager(cg, &offsetConfig)
+
 	go cg.topicListConsumer(topics)
 
 	return
@@ -247,6 +208,12 @@ func (cg *ConsumerGroup) Close() error {
 
 		close(cg.stopper)
 		cg.wg.Wait()
+
+		if err := cg.offsetManager.Close(); err != nil {
+			cg.Logf("FAILED closing the offset manager: %s!\n", err)
+		} else {
+			cg.Logf("The offset manager successfully committed the last seen offsets.\n")
+		}
 
 		if shutdownError = cg.zk.DeregisterConsumer(cg.name, cg.id); shutdownError != nil {
 			cg.Logf("FAILED deregistering consumer: %s!\n", shutdownError)
@@ -277,70 +244,8 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 }
 
 func (cg *ConsumerGroup) CommitUpto(event *sarama.ConsumerEvent) error {
-	cg.acks <- event
+	cg.offsetManager.MarkAsSeen(event.Topic, event.Partition, event.Offset)
 	return nil
-}
-
-func (cg *ConsumerGroup) offsetCommitter() {
-	defer cg.closeOnPanic()
-	defer cg.commitOffsets()
-
-	commitTicker := time.NewTicker(cg.config.CommitInterval)
-	defer commitTicker.Stop()
-
-	for {
-		select {
-		case <-cg.stopper:
-			return
-		case <-commitTicker.C:
-			cg.commitOffsets()
-		}
-	}
-}
-
-func (cg *ConsumerGroup) commitOffsets() {
-	cg.Logf("Comitting offsets to ZK...\n")
-	for topic, partitionOffsets := range cg.offsets {
-		for partition, offsetTracker := range partitionOffsets {
-			committer := func(offset int64) error {
-				return cg.zk.Commit(cg.name, topic, partition, offset+1)
-			}
-
-			err := offsetTracker.Commit(committer)
-			switch err {
-			case nil:
-				cg.Logf("Committed offset %d for %s:%d\n", offsetTracker.highestOffsetSeen, topic, partition)
-			case AlreadyCommitted:
-				// noop
-			default:
-				cg.Logf("Failed to commit offset %d for %s:%d\n", offsetTracker.highestOffsetSeen, topic, partition)
-			}
-		}
-	}
-}
-
-func (cg *ConsumerGroup) offsetCollector() {
-	defer cg.closeOnPanic()
-
-	for {
-		select {
-		case <-cg.stopper:
-			return
-
-		case event := <-cg.acks:
-			if event.Err != nil {
-				// You should not ack errors, will ignore for now
-				continue
-			}
-			cg.updateOffset(event)
-		}
-	}
-}
-
-func (cg *ConsumerGroup) updateOffset(event *sarama.ConsumerEvent) {
-	cg.offsetsLock.RLock()
-	defer cg.offsetsLock.RUnlock()
-	cg.offsets[event.Topic][event.Partition].MarkAsSeen(event.Offset)
 }
 
 func (cg *ConsumerGroup) closeOnPanic() {
@@ -410,12 +315,6 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 
 	cg.Logf("Started topic consumer for %s\n", topic)
 
-	cg.offsetsLock.Lock()
-	if cg.offsets[topic] == nil {
-		cg.offsets[topic] = make(topicOffsets)
-	}
-	cg.offsetsLock.Unlock()
-
 	// Fetch a list of partition IDs
 	partitions, err := cg.zk.Partitions(topic)
 	if err != nil {
@@ -455,21 +354,24 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	}
 	defer cg.zk.Release(cg.name, topic, partition, cg.id)
 
-	nextOffset, err := cg.zk.Offset(cg.name, topic, partition)
+	nextOffset, err := cg.offsetManager.InitializePartition(topic, partition)
 	if err != nil {
 		panic(err)
 	}
-
-	cg.offsetsLock.Lock()
-	cg.offsets[topic][partition] = newPartitionOffsetTracker(nextOffset - 1)
-	cg.offsetsLock.Unlock()
 
 	config := sarama.NewPartitionConsumerConfig()
 	if nextOffset > 0 {
 		config.OffsetMethod = sarama.OffsetMethodManual
 		config.OffsetValue = nextOffset
+		cg.Logf("Partition consumer for %s:%d starting at offset %d.\n", topic, partition, nextOffset)
+
 	} else {
 		config.OffsetMethod = cg.config.InitialOffsetMethod
+		if config.OffsetMethod == sarama.OffsetMethodOldest {
+			cg.Logf("Partition consumer for %s:%d starting at the oldest available offset.\n", topic, partition)
+		} else if config.OffsetMethod == sarama.OffsetMethodNewest {
+			cg.Logf("Partition consumer for %s:%d for new messages only.\n", topic, partition)
+		}
 	}
 
 	consumer, err := cg.consumer.ConsumePartition(topic, partition, config)
@@ -477,8 +379,6 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		panic(err)
 	}
 	defer consumer.Close()
-
-	cg.Logf("Started partition consumer for %s:%d at offset %d.\n", topic, partition, nextOffset)
 
 	partitionEvents := consumer.Events()
 
