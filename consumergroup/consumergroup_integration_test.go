@@ -53,6 +53,9 @@ func ExampleConsumerGroup() {
 		// Process event
 		log.Println(string(event.Value))
 		eventCount += 1
+
+		// Ack event
+		consumer.CommitUpto(event)
 	}
 
 	log.Printf("Processed %d events.", eventCount)
@@ -78,7 +81,7 @@ func TestIntegrationMultipleTopicsSingleConsumer(t *testing.T) {
 	defer consumer.Close()
 
 	var offsets = make(OffsetMap)
-	assertEvents(t, consumer.Events(), 300, offsets)
+	assertEvents(t, consumer, 300, offsets)
 }
 
 func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
@@ -126,10 +129,12 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 		case event1, ok1 := <-events1:
 			handleEvent(event1, ok1)
 			eventCount1 += 1
+			consumer1.CommitUpto(event1)
 
 		case event2, ok2 := <-events2:
 			handleEvent(event2, ok2)
 			eventCount2 += 1
+			consumer2.CommitUpto(event2)
 		}
 	}
 
@@ -157,18 +162,16 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer consumer1.Close()
 
-	assertEvents(t, consumer1.Events(), 10, offsets)
+	assertEvents(t, consumer1, 10, offsets)
 	consumer1.Close()
 
 	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeper, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer consumer2.Close()
 
-	assertEvents(t, consumer2.Events(), 10, offsets)
+	assertEvents(t, consumer2, 10, offsets)
 	consumer2.Close()
 }
 
@@ -178,14 +181,14 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 
 type OffsetMap map[string]map[int32]int64
 
-func assertEvents(t *testing.T, stream <-chan *sarama.ConsumerEvent, count int64, offsets OffsetMap) {
+func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMap) {
 	var processed int64
 	for processed < count {
 		select {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("Reader timeout after %d events!", processed)
 
-		case event, ok := <-stream:
+		case event, ok := <-cg.Events():
 			if !ok {
 				t.Fatal("Event stream closed prematurely")
 			} else if event.Err != nil {
@@ -201,8 +204,8 @@ func assertEvents(t *testing.T, stream <-chan *sarama.ConsumerEvent, count int64
 				}
 
 				processed += 1
-
 				offsets[event.Topic][event.Partition] = event.Offset
+				cg.CommitUpto(event)
 			}
 
 		}
