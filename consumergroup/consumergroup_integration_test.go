@@ -200,7 +200,7 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 					offsets[event.Topic] = make(map[int32]int64)
 				}
 				if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition]+1 != event.Offset {
-					t.Fatalf("Unexpected offset on %s:%d. Expected %d, got %d.", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset)
+					t.Fatalf("Unexpected offset on %s/%d. Expected %d, got %d.", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset)
 				}
 
 				processed += 1
@@ -260,7 +260,7 @@ func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions
 		if offsetErr != nil {
 			t.Fatal(offsetErr)
 		} else {
-			t.Logf("Next offset for %s:%d = %d", topic, partition, nextOffset)
+			t.Logf("Next offset for %s/%d = %d", topic, partition, nextOffset)
 		}
 
 		if err := zk.Commit(consumerGroup, topic, partition, nextOffset); err != nil {

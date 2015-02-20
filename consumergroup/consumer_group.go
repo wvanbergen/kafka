@@ -12,7 +12,6 @@ import (
 var (
 	AlreadyClosing         = errors.New("The consumer group is already shutting down.")
 	FailedToClaimPartition = errors.New("Failed to claim partition for this consumer instance. Do you have a rogue consumer running?")
-	AlreadyCommitted       = errors.New("The highest seen offset was already committed")
 )
 
 type ConsumerGroupConfig struct {
@@ -211,14 +210,12 @@ func (cg *ConsumerGroup) Close() error {
 
 		if err := cg.offsetManager.Close(); err != nil {
 			cg.Logf("FAILED closing the offset manager: %s!\n", err)
-		} else {
-			cg.Logf("The offset manager successfully committed the last seen offsets.\n")
 		}
 
 		if shutdownError = cg.zk.DeregisterConsumer(cg.name, cg.id); shutdownError != nil {
-			cg.Logf("FAILED deregistering consumer: %s!\n", shutdownError)
+			cg.Logf("FAILED deregistering consumer instance: %s!\n", shutdownError)
 		} else {
-			cg.Logf("Deregistered consumer.\n")
+			cg.Logf("Deregistered consumer istance %s.\n", cg.id)
 		}
 
 		if shutdownError = cg.client.Close(); shutdownError != nil {
@@ -363,14 +360,14 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 	if nextOffset > 0 {
 		config.OffsetMethod = sarama.OffsetMethodManual
 		config.OffsetValue = nextOffset
-		cg.Logf("Partition consumer for %s:%d starting at offset %d.\n", topic, partition, nextOffset)
+		cg.Logf("Partition consumer for %s/%d starting at offset %d.\n", topic, partition, nextOffset)
 
 	} else {
 		config.OffsetMethod = cg.config.InitialOffsetMethod
 		if config.OffsetMethod == sarama.OffsetMethodOldest {
-			cg.Logf("Partition consumer for %s:%d starting at the oldest available offset.\n", topic, partition)
+			cg.Logf("Partition consumer for %s/%d starting at the oldest available offset.\n", topic, partition)
 		} else if config.OffsetMethod == sarama.OffsetMethodNewest {
-			cg.Logf("Partition consumer for %s:%d for new messages only.\n", topic, partition)
+			cg.Logf("Partition consumer for %s/%d for new messages only.\n", topic, partition)
 		}
 	}
 
@@ -406,5 +403,9 @@ partitionConsumerLoop:
 		}
 	}
 
-	cg.Logf("Stopping partition consumer for %s:%d at offset %d.\n", topic, partition, lastOffset)
+	if lastCommittedOffset, err := cg.offsetManager.FinalizePartition(topic, partition); err == nil {
+		cg.Logf("Stopping partition consumer for %s/%d at offset %d.\n", topic, partition, lastCommittedOffset)
+	} else {
+		cg.Logf("FAILED to commit offset %d when stopping partition consumer for %s/%d.\n", lastOffset, topic, partition)
+	}
 }
