@@ -26,6 +26,7 @@ func NewMonitor(name string, consumergroup string, zookeeper []string, config *C
 	if config == nil {
 		config = NewConsumerGroupConfig()
 	}
+	config.SaramaConfig.ClientID = name
 
 	zkConn, err := NewZK(zookeeper, config.ZookeeperChroot, config.ZookeeperTimeout)
 	if err != nil {
@@ -42,7 +43,7 @@ func NewMonitor(name string, consumergroup string, zookeeper []string, config *C
 		brokerList = append(brokerList, broker)
 	}
 
-	saramaClient, err := sarama.NewClient(name, brokerList, config.KafkaClientConfig)
+	saramaClient, err := sarama.NewClient(brokerList, config.SaramaConfig)
 	if err != nil {
 		return nil, err
 	}

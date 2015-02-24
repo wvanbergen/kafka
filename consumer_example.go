@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DefaultKafkaTopics   = "nginx.multitrack"
+	DefaultKafkaTopics   = "test_topic"
 	DefaultConsumerGroup = "consumer_example.go"
 )
 
@@ -42,7 +42,7 @@ func init() {
 
 func main() {
 	config := consumergroup.NewConsumerGroupConfig()
-	config.InitialOffsetMethod = sarama.OffsetMethodNewest
+	config.InitialOffset = sarama.OffsetNewest
 	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, config)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
@@ -57,27 +57,27 @@ func main() {
 		}
 	}()
 
+	go func() {
+		for err := range consumer.Errors() {
+			log.Println(err)
+		}
+	}()
+
 	eventCount := 0
 	offsets := make(map[string]map[int32]int64)
 
-	stream := consumer.Events()
-	for event := range stream {
-		if event.Err != nil {
-			log.Println(event.Err)
-			break
-		}
-
-		if offsets[event.Topic] == nil {
-			offsets[event.Topic] = make(map[int32]int64)
+	for message := range consumer.Messages() {
+		if offsets[message.Topic] == nil {
+			offsets[message.Topic] = make(map[int32]int64)
 		}
 
 		eventCount += 1
-		if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition] != event.Offset-1 {
-			log.Printf("Unexpected offset on %s:%d. Expected %d, found %d, diff %d.\n", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset, event.Offset-offsets[event.Topic][event.Partition]+1)
+		if offsets[message.Topic][message.Partition] != 0 && offsets[message.Topic][message.Partition] != message.Offset-1 {
+			log.Printf("Unexpected offset on %s:%d. Expected %d, found %d, diff %d.\n", message.Topic, message.Partition, offsets[message.Topic][message.Partition]+1, message.Offset, message.Offset-offsets[message.Topic][message.Partition]+1)
 		}
 
-		offsets[event.Topic][event.Partition] = event.Offset
-		consumer.CommitUpto(event)
+		offsets[message.Topic][message.Partition] = message.Offset
+		consumer.CommitUpto(message)
 	}
 
 	log.Printf("Processed %d events.", eventCount)

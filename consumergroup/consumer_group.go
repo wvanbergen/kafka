@@ -22,20 +22,19 @@ type ConsumerGroupConfig struct {
 	// Leave this empty when your Kafka install does not use a chroot.
 	ZookeeperChroot string
 
-	KafkaClientConfig   *sarama.ClientConfig   // This will be passed to Sarama when creating a new sarama.Client
-	KafkaConsumerConfig *sarama.ConsumerConfig // This will be passed to Sarama when creating a new sarama.Consumer
+	SaramaConfig *sarama.Config // This will be passed to Sarama when creating a new consumer
 
-	ChannelBufferSize   int                 // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering. Default is 256.
-	CommitInterval      time.Duration       // The interval between which the prossed offsets are commited to Zookeeper.
-	InitialOffsetMethod sarama.OffsetMethod // The initial offset method to use if the consumer has no previously stored offset. Must be either sarama.OffsetMethodOldest (default) or sarama.OffsetMethodNewest.
+	ChannelBufferSize int           // The buffer size of the channel for the messages coming from Kafka. Zero means no buffering. Default is 256.
+	CommitInterval    time.Duration // The interval between which the prossed offsets are commited to Zookeeper.
+	InitialOffset     int64         // The initial offset method to use if the consumer has no previously stored offset. Must be either sarama.OffsetMethodOldest (default) or sarama.OffsetMethodNewest.
 }
 
 func NewConsumerGroupConfig() *ConsumerGroupConfig {
 	return &ConsumerGroupConfig{
-		ZookeeperTimeout:    1 * time.Second,
-		ChannelBufferSize:   256,
-		CommitInterval:      10 * time.Second,
-		InitialOffsetMethod: sarama.OffsetMethodOldest,
+		ZookeeperTimeout:  1 * time.Second,
+		ChannelBufferSize: 256,
+		CommitInterval:    10 * time.Second,
+		InitialOffset:     sarama.OffsetOldest,
 	}
 }
 
@@ -52,20 +51,14 @@ func (cgc *ConsumerGroupConfig) Validate() error {
 		return errors.New("ChannelBufferSize should be >= 0.")
 	}
 
-	if cgc.KafkaClientConfig != nil {
-		if err := cgc.KafkaClientConfig.Validate(); err != nil {
+	if cgc.SaramaConfig != nil {
+		if err := cgc.SaramaConfig.Validate(); err != nil {
 			return err
 		}
 	}
 
-	if cgc.InitialOffsetMethod != sarama.OffsetMethodNewest && cgc.InitialOffsetMethod != sarama.OffsetMethodOldest {
-		return errors.New("InitialOffsetMethod should OffsetMethodNewest or OffsetMethodOldest.")
-	}
-
-	if cgc.KafkaConsumerConfig != nil {
-		if err := cgc.KafkaConsumerConfig.Validate(); err != nil {
-			return err
-		}
+	if cgc.InitialOffset != sarama.OffsetOldest && cgc.InitialOffset != sarama.OffsetNewest {
+		return errors.New("InitialOffset should OffsetMethodNewest or OffsetMethodOldest.")
 	}
 
 	return nil
@@ -78,15 +71,15 @@ type ConsumerGroup struct {
 
 	config *ConsumerGroupConfig
 
-	client   *sarama.Client
 	consumer *sarama.Consumer
 	zk       *ZK
 
 	wg             sync.WaitGroup
 	singleShutdown sync.Once
 
-	events  chan *sarama.ConsumerEvent
-	stopper chan struct{}
+	messages chan *sarama.ConsumerMessage
+	errors   chan *sarama.ConsumerError
+	stopper  chan struct{}
 
 	brokers   map[int]string
 	consumers []string
@@ -112,6 +105,10 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	if config == nil {
 		config = NewConsumerGroupConfig()
 	}
+	if config.SaramaConfig == nil {
+		config.SaramaConfig = sarama.NewConfig()
+	}
+	config.SaramaConfig.ClientID = name
 
 	// Validate configuration
 	if err = config.Validate(); err != nil {
@@ -134,15 +131,8 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		brokerList = append(brokerList, broker)
 	}
 
-	var client *sarama.Client
-	if client, err = sarama.NewClient(name, brokerList, config.KafkaClientConfig); err != nil {
-		zk.Close()
-		return
-	}
-
 	var consumer *sarama.Consumer
-	if consumer, err = sarama.NewConsumer(client, config.KafkaConsumerConfig); err != nil {
-		client.Close()
+	if consumer, err = sarama.NewConsumer(brokerList, config.SaramaConfig); err != nil {
 		zk.Close()
 		return
 	}
@@ -150,7 +140,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	var consumerID string
 	consumerID, err = generateConsumerID()
 	if err != nil {
-		client.Close()
+		consumer.Close()
 		zk.Close()
 		return
 	}
@@ -160,10 +150,10 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		name:     name,
 		config:   config,
 		brokers:  brokers,
-		client:   client,
 		consumer: consumer,
 		zk:       zk,
-		events:   make(chan *sarama.ConsumerEvent, config.ChannelBufferSize),
+		messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
+		errors:   make(chan *sarama.ConsumerError, config.ChannelBufferSize),
 		stopper:  make(chan struct{}),
 	}
 
@@ -190,8 +180,13 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 }
 
 // Returns a channel that you can read to obtain events from Kafka to process.
-func (cg *ConsumerGroup) Events() <-chan *sarama.ConsumerEvent {
-	return cg.events
+func (cg *ConsumerGroup) Messages() <-chan *sarama.ConsumerMessage {
+	return cg.messages
+}
+
+// Returns a channel that you can read to obtain events from Kafka to process.
+func (cg *ConsumerGroup) Errors() <-chan *sarama.ConsumerError {
+	return cg.errors
 }
 
 func (cg *ConsumerGroup) Closed() bool {
@@ -218,11 +213,12 @@ func (cg *ConsumerGroup) Close() error {
 			cg.Logf("Deregistered consumer istance %s.\n", cg.id)
 		}
 
-		if shutdownError = cg.client.Close(); shutdownError != nil {
+		if shutdownError = cg.consumer.Close(); shutdownError != nil {
 			cg.Logf("FAILED closing the Sarama client: %s\n", shutdownError)
 		}
 
-		close(cg.events)
+		close(cg.messages)
+		close(cg.errors)
 		cg.id = ""
 
 	})
@@ -240,8 +236,8 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 	sarama.Logger.Printf("[%s/%s] %s", cg.name, identifier, fmt.Sprintf(format, args...))
 }
 
-func (cg *ConsumerGroup) CommitUpto(event *sarama.ConsumerEvent) error {
-	cg.offsetManager.MarkAsProcessed(event.Topic, event.Partition, event.Offset)
+func (cg *ConsumerGroup) CommitUpto(message *sarama.ConsumerMessage) error {
+	cg.offsetManager.MarkAsProcessed(message.Topic, message.Partition, message.Offset)
 	return nil
 }
 
@@ -251,9 +247,9 @@ func (cg *ConsumerGroup) closeOnPanic() {
 
 		// Try to produce an error event on the channel so we can inform the consumer.
 		// If that doesn't work, continue.
-		errorEvent := &sarama.ConsumerEvent{Err: fmt.Errorf("%s", err)}
+		ce := &sarama.ConsumerError{Err: fmt.Errorf("%s", err)}
 		select {
-		case cg.events <- errorEvent:
+		case cg.errors <- ce:
 		default:
 		}
 
@@ -284,7 +280,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 
 		for _, topic := range topics {
 			cg.wg.Add(1)
-			go cg.topicConsumer(topic, cg.events, stopper)
+			go cg.topicConsumer(topic, cg.messages, cg.errors, stopper)
 		}
 
 		select {
@@ -300,7 +296,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 	}
 }
 
-func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.ConsumerEvent, stopper <-chan struct{}) {
+func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, stopper <-chan struct{}) {
 	defer cg.closeOnPanic()
 	defer cg.wg.Done()
 
@@ -327,7 +323,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 	for _, pid := range myPartitions {
 
 		wg.Add(1)
-		go cg.partitionConsumer(topic, pid.id, events, &wg, stopper)
+		go cg.partitionConsumer(topic, pid.id, messages, errors, &wg, stopper)
 	}
 
 	wg.Wait()
@@ -335,7 +331,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, events chan<- *sarama.Consu
 }
 
 // Consumes a partition
-func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events chan<- *sarama.ConsumerEvent, wg *sync.WaitGroup, stopper <-chan struct{}) {
+func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, wg *sync.WaitGroup, stopper <-chan struct{}) {
 	defer cg.closeOnPanic()
 	defer wg.Done()
 
@@ -356,41 +352,44 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, events
 		panic(err)
 	}
 
-	config := sarama.NewPartitionConsumerConfig()
 	if nextOffset > 0 {
-		config.OffsetMethod = sarama.OffsetMethodManual
-		config.OffsetValue = nextOffset
 		cg.Logf("Partition consumer for %s/%d starting at offset %d.\n", topic, partition, nextOffset)
-
 	} else {
-		config.OffsetMethod = cg.config.InitialOffsetMethod
-		if config.OffsetMethod == sarama.OffsetMethodOldest {
+		nextOffset = cg.config.InitialOffset
+		if nextOffset == sarama.OffsetOldest {
 			cg.Logf("Partition consumer for %s/%d starting at the oldest available offset.\n", topic, partition)
-		} else if config.OffsetMethod == sarama.OffsetMethodNewest {
+		} else if nextOffset == sarama.OffsetNewest {
 			cg.Logf("Partition consumer for %s/%d for new messages only.\n", topic, partition)
 		}
 	}
 
-	consumer, err := cg.consumer.ConsumePartition(topic, partition, config)
+	consumer, err := cg.consumer.ConsumePartition(topic, partition, nextOffset)
 	if err != nil {
 		panic(err)
 	}
 	defer consumer.Close()
-
-	partitionEvents := consumer.Events()
 
 	err = nil
 	var lastOffset int64 = -1 // aka unknown
 partitionConsumerLoop:
 	for {
 		select {
-		case event := <-partitionEvents:
+		case err := <-consumer.Errors():
 			for {
 				select {
-				case events <- event:
-					if event.Err == nil {
-						lastOffset = event.Offset
-					}
+				case errors <- err:
+					continue partitionConsumerLoop
+
+				case <-stopper:
+					break partitionConsumerLoop
+				}
+			}
+
+		case message := <-consumer.Messages():
+			for {
+				select {
+				case messages <- message:
+					lastOffset = message.Offset
 					continue partitionConsumerLoop
 
 				case <-stopper:
