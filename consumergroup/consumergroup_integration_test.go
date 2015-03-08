@@ -44,12 +44,7 @@ func ExampleConsumerGroup() {
 
 	eventCount := 0
 
-	for event := range consumer.Events() {
-		if event.Err != nil {
-			log.Println(event.Err)
-			break
-		}
-
+	for event := range consumer.Messages() {
 		// Process event
 		log.Println(string(event.Value))
 		eventCount += 1
@@ -104,21 +99,19 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 	var eventCount1, eventCount2 int64
 	offsets := make(map[int32]int64)
 
-	events1 := consumer1.Events()
-	events2 := consumer2.Events()
+	events1 := consumer1.Messages()
+	events2 := consumer2.Messages()
 
-	handleEvent := func(event *sarama.ConsumerEvent, ok bool) {
+	handleEvent := func(message *sarama.ConsumerMessage, ok bool) {
 		if !ok {
 			t.Fatal("Event stream closed prematurely")
-		} else if event.Err != nil {
-			t.Fatal(event.Err)
 		}
 
-		if offsets[event.Partition] != 0 && offsets[event.Partition]+1 != event.Offset {
-			t.Fatalf("Unecpected offset on partition %d. Expected %d, got %d.", event.Partition, offsets[event.Partition]+1, event.Offset)
+		if offsets[message.Partition] != 0 && offsets[message.Partition]+1 != message.Offset {
+			t.Fatalf("Unecpected offset on partition %d. Expected %d, got %d.", message.Partition, offsets[message.Partition]+1, message.Offset)
 		}
 
-		offsets[event.Partition] = event.Offset
+		offsets[message.Partition] = message.Offset
 	}
 
 	for eventCount1+eventCount2 < 200 {
@@ -188,24 +181,22 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 		case <-time.After(5 * time.Second):
 			t.Fatalf("Reader timeout after %d events!", processed)
 
-		case event, ok := <-cg.Events():
+		case message, ok := <-cg.Messages():
 			if !ok {
 				t.Fatal("Event stream closed prematurely")
-			} else if event.Err != nil {
-				t.Fatal(event.Err)
 			}
 
 			if offsets != nil {
-				if offsets[event.Topic] == nil {
-					offsets[event.Topic] = make(map[int32]int64)
+				if offsets[message.Topic] == nil {
+					offsets[message.Topic] = make(map[int32]int64)
 				}
-				if offsets[event.Topic][event.Partition] != 0 && offsets[event.Topic][event.Partition]+1 != event.Offset {
-					t.Fatalf("Unexpected offset on %s/%d. Expected %d, got %d.", event.Topic, event.Partition, offsets[event.Topic][event.Partition]+1, event.Offset)
+				if offsets[message.Topic][message.Partition] != 0 && offsets[message.Topic][message.Partition]+1 != message.Offset {
+					t.Fatalf("Unexpected offset on %s/%d. Expected %d, got %d.", message.Topic, message.Partition, offsets[message.Topic][message.Partition]+1, message.Offset)
 				}
 
 				processed += 1
-				offsets[event.Topic][event.Partition] = event.Offset
-				cg.CommitUpto(event)
+				offsets[message.Topic][message.Partition] = message.Offset
+				cg.CommitUpto(message)
 			}
 
 		}
@@ -213,8 +204,8 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 	t.Logf("Successfully asserted %d events.", count)
 }
 
-func saramaClient(name string) *sarama.Client {
-	client, err := sarama.NewClient(name, []string{"localhost:9092"}, nil)
+func saramaClient() *sarama.Client {
+	client, err := sarama.NewClient([]string{"localhost:9092"}, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -222,17 +213,14 @@ func saramaClient(name string) *sarama.Client {
 }
 
 func produceEvents(t *testing.T, consumerGroup string, topic string, amount int64) error {
-	client := saramaClient(fmt.Sprintf("%s-%s", consumerGroup, "producer"))
-	defer client.Close()
-
-	producer, err := sarama.NewSimpleProducer(client, nil)
+	producer, err := sarama.NewSyncProducer([]string{"localhost:9092"}, nil)
 	if err != nil {
 		return err
 	}
 	defer producer.Close()
 
 	for i := int64(1); i <= amount; i++ {
-		err = producer.SendMessage(topic, nil, sarama.StringEncoder(fmt.Sprintf("testing %d", i)))
+		_, _, err = producer.SendMessage(topic, nil, sarama.StringEncoder(fmt.Sprintf("testing %d", i)))
 
 		if err != nil {
 			return err
@@ -243,7 +231,7 @@ func produceEvents(t *testing.T, consumerGroup string, topic string, amount int6
 }
 
 func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions int32) {
-	client := saramaClient(fmt.Sprintf("%s-%s", consumerGroup, "setup"))
+	client := saramaClient()
 	defer client.Close()
 
 	// Connect to zookeeper to commit the last seen offset.
