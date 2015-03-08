@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"github.com/Shopify/sarama"
 	"github.com/wvanbergen/kafka/consumergroup"
