@@ -2,6 +2,7 @@ package consumergroup
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -28,10 +29,10 @@ type OffsetManager interface {
 
 	// FinalizePartition is called when the consumergroup is done consuming a
 	// partition. In this method, the offset manager can flush any remaining offsets to its
-	// backend store. It should return the last committed offset, and an error if there
-	// was any problem flushing the offset. Note: it's possible that the consumergroup
-	// instance will start to consume the same partition again after this function is called.
-	FinalizePartition(topic string, partition int32) (int64, error)
+	// backend store. It should return an error if it was not able to commit the offset.
+	// Note: it's possible that the consumergroup instance will start to consume the same
+	// partition again after this function is called.
+	FinalizePartition(topic string, partition int32, lastOffset int64, timeout time.Duration) error
 
 	// Close is called when the consumergroup is shutting down. In normal circumstances, all
 	// offsets are committed because FinalizePartition is called for all the running partition
@@ -41,7 +42,7 @@ type OffsetManager interface {
 }
 
 var (
-	UncleanClose = errors.New("Not all offsets were committed before shutdown was completed.")
+	UncleanClose = errors.New("Not all offsets were committed before shutdown was completed")
 )
 
 // OffsetManagerConfig holds configuration setting son how the offset manager should behave.
@@ -65,8 +66,10 @@ type (
 
 type partitionOffsetTracker struct {
 	l                      sync.Mutex
+	waitingForOffset       int64
 	highestProcessedOffset int64
 	lastCommittedOffset    int64
+	done                   chan struct{}
 }
 
 type zookeeperOffsetManager struct {
@@ -114,22 +117,33 @@ func (zom *zookeeperOffsetManager) InitializePartition(topic string, partition i
 	zom.offsets[topic][partition] = &partitionOffsetTracker{
 		highestProcessedOffset: nextOffset - 1,
 		lastCommittedOffset:    nextOffset - 1,
+		done:                   make(chan struct{}),
 	}
 
 	return nextOffset, nil
 }
 
-func (zom *zookeeperOffsetManager) FinalizePartition(topic string, partition int32) (int64, error) {
-	zom.l.Lock()
-	defer zom.l.Unlock()
-
+func (zom *zookeeperOffsetManager) FinalizePartition(topic string, partition int32, lastOffset int64, timeout time.Duration) error {
+	zom.l.RLock()
 	tracker := zom.offsets[topic][partition]
-	err := zom.commitOffset(topic, partition, tracker)
-	if err == nil {
-		delete(zom.offsets[topic], partition)
+	zom.l.RUnlock()
+
+	if lastOffset-tracker.highestProcessedOffset > 0 {
+		zom.cg.Logf("%s/%d :: Last processed offset: %d. Waiting up to %ds for another %d messages to process...", topic, partition, tracker.highestProcessedOffset, timeout/time.Second, lastOffset-tracker.highestProcessedOffset)
+		if !tracker.waitForOffset(lastOffset, timeout) {
+			return fmt.Errorf("TIMEOUT waiting for offset %d. Last committed offset: %d", lastOffset, tracker.lastCommittedOffset)
+		}
 	}
 
-	return tracker.lastCommittedOffset, err
+	if err := zom.commitOffset(topic, partition, tracker); err != nil {
+		return fmt.Errorf("FAILED to commit offset %d to Zookeeper. Last committed offset: %d", tracker.highestProcessedOffset, tracker.lastCommittedOffset)
+	}
+
+	zom.l.Lock()
+	delete(zom.offsets[topic], partition)
+	zom.l.Unlock()
+
+	return nil
 }
 
 func (zom *zookeeperOffsetManager) MarkAsProcessed(topic string, partition int32, offset int64) bool {
@@ -145,19 +159,14 @@ func (zom *zookeeperOffsetManager) Close() error {
 	zom.l.Lock()
 	defer zom.l.Unlock()
 
-	var uncleanClose bool
-	for topic, partitionOffsets := range zom.offsets {
+	var closeError error
+	for _, partitionOffsets := range zom.offsets {
 		if len(partitionOffsets) > 0 {
-			uncleanClose = true
-			zom.cg.Logf("Uncommitted offsets for topic %s! Committing now...\n", topic)
+			closeError = UncleanClose
 		}
 	}
 
-	if uncleanClose {
-		return UncleanClose
-	} else {
-		return nil
-	}
+	return closeError
 }
 
 func (zom *zookeeperOffsetManager) offsetCommitter() {
@@ -215,6 +224,9 @@ func (pot *partitionOffsetTracker) markAsProcessed(offset int64) bool {
 	defer pot.l.Unlock()
 	if offset > pot.highestProcessedOffset {
 		pot.highestProcessedOffset = offset
+		if pot.waitingForOffset == pot.highestProcessedOffset {
+			close(pot.done)
+		}
 		return true
 	} else {
 		return false
@@ -235,5 +247,22 @@ func (pot *partitionOffsetTracker) commit(committer offsetCommitter) error {
 		return nil
 	} else {
 		return nil
+	}
+}
+
+func (pot *partitionOffsetTracker) waitForOffset(offset int64, timeout time.Duration) bool {
+	pot.l.Lock()
+	if offset > pot.highestProcessedOffset {
+		pot.waitingForOffset = offset
+		pot.l.Unlock()
+		select {
+		case <-pot.done:
+			return true
+		case <-time.After(timeout):
+			return false
+		}
+	} else {
+		pot.l.Unlock()
+		return true
 	}
 }
