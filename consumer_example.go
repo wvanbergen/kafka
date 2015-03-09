@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"github.com/Shopify/sarama"
 	"github.com/wvanbergen/kafka/consumergroup"
@@ -41,8 +42,10 @@ func init() {
 }
 
 func main() {
-	config := consumergroup.NewConsumerGroupConfig()
-	config.InitialOffset = sarama.OffsetNewest
+	config := consumergroup.NewConfig()
+	config.Offsets.Initial = sarama.OffsetNewest
+	config.Offsets.ProcessingTimeout = 10 * time.Second
+
 	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, config)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
@@ -75,6 +78,9 @@ func main() {
 		if offsets[message.Topic][message.Partition] != 0 && offsets[message.Topic][message.Partition] != message.Offset-1 {
 			log.Printf("Unexpected offset on %s:%d. Expected %d, found %d, diff %d.\n", message.Topic, message.Partition, offsets[message.Topic][message.Partition]+1, message.Offset, message.Offset-offsets[message.Topic][message.Partition]+1)
 		}
+
+		// Simulate processing time
+		time.Sleep(10 * time.Millisecond)
 
 		offsets[message.Topic][message.Partition] = message.Offset
 		consumer.CommitUpto(message)

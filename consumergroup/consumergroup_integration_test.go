@@ -148,7 +148,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	// If the channel is buffered, the consumer will enqueue more events in the channel,
 	// which assertEvents will simply skip. When consumer 2 starts it will skip a bunch of
 	// events because of this. Transactional processing will fix this.
-	config := NewConsumerGroupConfig()
+	config := NewConfig()
 	config.ChannelBufferSize = 0
 
 	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeper, config)

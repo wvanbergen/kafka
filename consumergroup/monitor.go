@@ -22,13 +22,13 @@ type ConsumerGroupProcessingLag map[string]TopicProcessingLag // The number of m
 
 // Instantiates a new consumergroup monitor. Retuns the number of messages the consumergroup is behind
 // the latest offset in Kafka for every topic/partition the consumergroup is consuming.
-func NewMonitor(name string, consumergroup string, zookeeper []string, config *ConsumerGroupConfig) (*Monitor, error) {
+func NewMonitor(name string, consumergroup string, zookeeper []string, config *Config) (*Monitor, error) {
 	if config == nil {
-		config = NewConsumerGroupConfig()
+		config = NewConfig()
 	}
-	config.SaramaConfig.ClientID = name
+	config.ClientID = name
 
-	zkConn, err := NewZK(zookeeper, config.ZookeeperChroot, config.ZookeeperTimeout)
+	zkConn, err := NewZK(zookeeper, config.Zookeeper.Chroot, config.Zookeeper.Timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +43,7 @@ func NewMonitor(name string, consumergroup string, zookeeper []string, config *C
 		brokerList = append(brokerList, broker)
 	}
 
-	saramaClient, err := sarama.NewClient(brokerList, config.SaramaConfig)
+	saramaClient, err := sarama.NewClient(brokerList, config.Config)
 	if err != nil {
 		return nil, err
 	}
