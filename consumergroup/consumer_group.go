@@ -158,13 +158,13 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 	// Register consumer group
 	if err = zk.RegisterGroup(name); err != nil {
-		cg.Logf("FAILED to register consumer group (%s)!\n")
+		cg.Logf("FAILED to register consumer group: %s!\n", err)
 		return
 	}
 
 	// Register itself with zookeeper
 	if err = zk.RegisterConsumer(name, consumerID, topics); err != nil {
-		cg.Logf("FAILED to register consumer instance (%s)!\n", cg.id)
+		cg.Logf("FAILED to register consumer instance: %s!\n", err)
 		return
 	} else {
 		cg.Logf("Consumer instance registered (%s).", cg.id)

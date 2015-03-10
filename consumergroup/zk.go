@@ -37,8 +37,8 @@ func (z *ZK) Brokers() (map[int]string, error) {
 	}
 
 	type brokerEntry struct {
-		Host string `json:host`
-		Port int    `json:port`
+		Host string `json:"host"`
+		Port int    `json:"port"`
 	}
 
 	result := make(map[int]string)
@@ -87,7 +87,7 @@ func (z *ZK) Partitions(topic string) (partitionLeaderSlice, error) {
 	}
 
 	type partitionEntry struct {
-		Leader int `json:leader`
+		Leader int `json:"leader"`
 	}
 
 	result := make(partitionLeaderSlice, 0, len(children))
