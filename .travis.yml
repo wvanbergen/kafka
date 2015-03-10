@@ -14,7 +14,9 @@ before_install:
 - sleep 5
 - kafka/bin/kafka-topics.sh --create --partitions 1 --replication-factor 1 --topic consumergroup.single --zookeeper localhost:2181
 - kafka/bin/kafka-topics.sh --create --partitions 4 --replication-factor 1 --topic consumergroup.multi --zookeeper localhost:2181
+- go get golang.org/x/tools/cmd/vet
 
 script:
-- go build -o consumer_example
-- cd consumergroup && GORACE="halt_on_error=1" go test -v -race
+- go build ./...
+- go vet ./...
+- GORACE="halt_on_error=1" go test -v -race ./...
