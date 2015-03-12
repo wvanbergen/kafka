@@ -21,9 +21,8 @@ var (
 	waitForAll      = flag.Bool("wait-for-all", false, "Whether to wait for all ISR to Ack the message")
 	sleep           = flag.Int("sleep", 1000, "The number of nanoseconds to sleep between messages")
 	verbose         = flag.Bool("verbose", false, "Whether to enable Sarama logging")
+	statFrequency   = flag.Int("statFrequency", 1000, "How frequently (in messages) to print throughput and latency")
 )
-
-const StatusBatchSize = 1000
 
 type MessageMetadata struct {
 	EnqueuedAt time.Time
@@ -79,11 +78,11 @@ func main() {
 			totalLatency += message.Metadata.(*MessageMetadata).Latency()
 			successes++
 
-			if successes%StatusBatchSize == 0 {
+			if successes%*statFrequency == 0 {
 
 				batchDuration = time.Since(batchStartedAt)
-				rate = float64(StatusBatchSize) / (float64(batchDuration) / float64(time.Second))
-				latency = time.Duration(totalLatency / StatusBatchSize)
+				rate = float64(*statFrequency) / (float64(batchDuration) / float64(time.Second))
+				latency = totalLatency / time.Duration(*statFrequency)
 
 				log.Printf("Rate: %0.2f/s; latency: %0.2fms\n", rate, float64(latency)/float64(time.Millisecond))
 
