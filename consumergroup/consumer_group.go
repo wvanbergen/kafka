@@ -73,7 +73,7 @@ type ConsumerGroup struct {
 
 	config *Config
 
-	consumer *sarama.Consumer
+	consumer sarama.Consumer
 	zk       *ZK
 
 	wg             sync.WaitGroup
@@ -130,7 +130,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		brokerList = append(brokerList, broker)
 	}
 
-	var consumer *sarama.Consumer
+	var consumer sarama.Consumer
 	if consumer, err = sarama.NewConsumer(brokerList, config.Config); err != nil {
 		zk.Close()
 		return

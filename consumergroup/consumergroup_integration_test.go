@@ -17,7 +17,8 @@ const (
 )
 
 var (
-	zookeeper []string = []string{"localhost:2181"}
+	zookeeperAddr []string = []string{"localhost:2181"}
+	kafkaAddr     []string = []string{"localhost:9092"}
 )
 
 ////////////////////////////////////////////////////////////////////
@@ -28,7 +29,7 @@ func ExampleConsumerGroup() {
 	consumer, consumerErr := JoinConsumerGroup(
 		"ExampleConsumerGroup",
 		[]string{TopicWithSinglePartition, TopicWithMultiplePartitions},
-		[]string{"localhost:2181"},
+		zookeeperAddr,
 		nil)
 
 	if consumerErr != nil {
@@ -69,7 +70,7 @@ func TestIntegrationMultipleTopicsSingleConsumer(t *testing.T) {
 	go produceEvents(t, consumerGroup, TopicWithSinglePartition, 100)
 	go produceEvents(t, consumerGroup, TopicWithMultiplePartitions, 200)
 
-	consumer, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition, TopicWithMultiplePartitions}, zookeeper, nil)
+	consumer, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition, TopicWithMultiplePartitions}, zookeeperAddr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,13 +85,13 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 	setupZookeeper(t, consumerGroup, TopicWithMultiplePartitions, 4)
 	go produceEvents(t, consumerGroup, TopicWithMultiplePartitions, 200)
 
-	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeper, nil)
+	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeperAddr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer consumer1.Close()
 
-	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeper, nil)
+	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeperAddr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +152,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	config := NewConfig()
 	config.ChannelBufferSize = 0
 
-	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeper, config)
+	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeperAddr, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	assertEvents(t, consumer1, 10, offsets)
 	consumer1.Close()
 
-	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeper, nil)
+	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeperAddr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +206,7 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 }
 
 func saramaClient() *sarama.Client {
-	client, err := sarama.NewClient([]string{"localhost:9092"}, nil)
+	client, err := sarama.NewClient(kafkaAddr, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -213,7 +214,7 @@ func saramaClient() *sarama.Client {
 }
 
 func produceEvents(t *testing.T, consumerGroup string, topic string, amount int64) error {
-	producer, err := sarama.NewSyncProducer([]string{"localhost:9092"}, nil)
+	producer, err := sarama.NewSyncProducer(kafkaAddr, nil)
 	if err != nil {
 		return err
 	}
@@ -236,7 +237,7 @@ func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions
 
 	// Connect to zookeeper to commit the last seen offset.
 	// This way we should only produce events that we produce ourselves in this test.
-	zk, zkErr := NewZK(zookeeper, "", 1*time.Second)
+	zk, zkErr := NewZK(zookeeperAddr, "", 1*time.Second)
 	if zkErr != nil {
 		t.Fatal(zkErr)
 	}

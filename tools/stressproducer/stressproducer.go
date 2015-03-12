@@ -20,6 +20,7 @@ var (
 	messageBodySize = flag.Int("message-body-size", 100, "The size of the message payload")
 	waitForAll      = flag.Bool("wait-for-all", false, "Whether to wait for all ISR to Ack the message")
 	sleep           = flag.Int("sleep", 1000, "The number of nanoseconds to sleep between messages")
+	verbose         = flag.Bool("verbose", false, "Whether to enable Sarama logging")
 )
 
 const StatusBatchSize = 1000
@@ -34,7 +35,8 @@ func (mm *MessageMetadata) Latency() time.Duration {
 
 func producerConfiguration() *sarama.Config {
 	config := sarama.NewConfig()
-	config.Producer.AckSuccesses = true
+	config.Producer.Return.Errors = true
+	config.Producer.Return.Successes = true
 
 	if *waitForAll {
 		config.Producer.RequiredAcks = sarama.WaitForAll
@@ -53,6 +55,10 @@ func main() {
 		enqueued, successes, failures int
 		totalLatency                  time.Duration
 	)
+
+	if *verbose {
+		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+	}
 
 	producer, err := sarama.NewProducer(strings.Split(*brokerList, ","), producerConfiguration())
 	if err != nil {
