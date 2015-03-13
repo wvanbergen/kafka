@@ -9,7 +9,11 @@ Kafka libraries, tools and example applications built on top of the
 
 ### Tools
 
+The following tools can be useful for discovery, testing, and benchmarking. They also serve as examples
+of how to use Sarama.
+
 - **tools/stressproducer**: A tool to stress test the producer to measure throughput and latency.
+- **tools/consoleconsumer**: A tool to consume a kafka topic and write messages to STDOUT.
 
 ### Examples
 
