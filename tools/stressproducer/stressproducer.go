@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	brokerList      = flag.String("brokers", "localhost:9092", "The list of brokers in the Kafka cluster to produce to, comma separated")
+	brokerList      = flag.String("brokers", "localhost:9092", "The comma separated list of brokers in the Kafka cluster")
 	topic           = flag.String("topic", "test.throughput", "The topic to produce messages to")
 	messageBodySize = flag.Int("message-body-size", 100, "The size of the message payload")
 	waitForAll      = flag.Bool("wait-for-all", false, "Whether to wait for all ISR to Ack the message")
