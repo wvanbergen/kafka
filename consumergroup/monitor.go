@@ -11,10 +11,10 @@ import (
 // Keeps track of the status of a consumergroup, i.e. how far the processing is behind
 // on the events that are available in Kafka.
 type Monitor struct {
-	zookeeperConnection *ZK            // The zookeeper connection that gets the current offsets of the consumergroup.
-	zookeeperPath       string         // The path in zookeeper on which to find the current offsets for a consumergroup
-	ZookeeperChroot     string         // The chroot to use in zookeeper
-	kafkaConnection     *sarama.Client // The kafka connection that gets the available offsets.
+	zookeeperConnection *ZK           // The zookeeper connection that gets the current offsets of the consumergroup.
+	zookeeperPath       string        // The path in zookeeper on which to find the current offsets for a consumergroup
+	ZookeeperChroot     string        // The chroot to use in zookeeper
+	kafkaConnection     sarama.Client // The kafka connection that gets the available offsets.
 }
 
 type TopicProcessingLag map[int32]int64                       // The number of messages behind latest in Kafka for every partition in a topic
