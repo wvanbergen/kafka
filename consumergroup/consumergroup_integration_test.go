@@ -205,7 +205,7 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 	t.Logf("Successfully asserted %d events.", count)
 }
 
-func saramaClient() *sarama.Client {
+func saramaClient() sarama.Client {
 	client, err := sarama.NewClient(kafkaAddr, nil)
 	if err != nil {
 		panic(err)
