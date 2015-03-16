@@ -292,6 +292,11 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 	partitions, err := cg.zk.Partitions(topic)
 	if err != nil {
 		cg.Logf("%s :: FAILED to get list of partitions: %s\n", topic, err)
+		cg.errors <- &sarama.ConsumerError{
+			Topic:     topic,
+			Partition: 0,
+			Err:       err,
+		}
 		return
 	}
 
