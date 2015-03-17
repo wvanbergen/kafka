@@ -5,10 +5,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"gopkg.in/Shopify/sarama.v1"
 )
 
 const (
@@ -20,6 +21,18 @@ var (
 	zookeeperAddr []string = []string{"localhost:2181"}
 	kafkaAddr     []string = []string{"localhost:9092"}
 )
+
+func init() {
+	if zookeeperAddrCSV := os.Getenv("ZOOKEEPER_ADDR"); zookeeperAddrCSV != "" {
+		zookeeperAddr = strings.Split(zookeeperAddrCSV, ",")
+	}
+	if kafkaAddrCSV := os.Getenv("KAFKA_ADDR"); kafkaAddrCSV != "" {
+		kafkaAddr = strings.Split(kafkaAddrCSV, ",")
+	}
+
+	fmt.Printf("Using Zookeeper cluster at %v\n", zookeeperAddr)
+	fmt.Printf("Using Kafka cluster at %v\n", kafkaAddr)
+}
 
 ////////////////////////////////////////////////////////////////////
 // Examples
@@ -221,7 +234,8 @@ func produceEvents(t *testing.T, consumerGroup string, topic string, amount int6
 	defer producer.Close()
 
 	for i := int64(1); i <= amount; i++ {
-		_, _, err = producer.SendMessage(topic, nil, sarama.StringEncoder(fmt.Sprintf("testing %d", i)))
+		msg := &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(fmt.Sprintf("testing %d", i))}
+		_, _, err = producer.SendMessage(msg)
 
 		if err != nil {
 			return err
@@ -245,7 +259,7 @@ func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions
 
 	for partition := int32(0); partition < partitions; partition++ {
 		// Retrieve the offset that Sarama will use for the next message on the topic/partition.
-		nextOffset, offsetErr := client.GetOffset(topic, partition, sarama.LatestOffsets)
+		nextOffset, offsetErr := client.GetOffset(topic, partition, sarama.OffsetNewest)
 		if offsetErr != nil {
 			t.Fatal(offsetErr)
 		} else {

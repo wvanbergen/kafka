@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Shopify/sarama"
+	"gopkg.in/Shopify/sarama.v1"
 )
 
 var (
@@ -55,7 +55,11 @@ func main() {
 	}
 	defer producer.Close()
 
-	partition, offset, err := producer.SendMessage(*topic, keyEncoder, valueEncoder)
+	partition, offset, err := producer.SendMessage(&sarama.ProducerMessage{
+		Topic: *topic,
+		Key:   keyEncoder,
+		Value: valueEncoder,
+	})
 
 	if err != nil {
 		logger.Println("FAILED to produce message:", err)
