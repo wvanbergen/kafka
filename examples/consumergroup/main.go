@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Shopify/sarama"
 	"github.com/wvanbergen/kafka/consumergroup"
+	"gopkg.in/Shopify/sarama.v1"
 )
 
 const (

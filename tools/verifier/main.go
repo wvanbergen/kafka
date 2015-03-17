@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"gopkg.in/Shopify/sarama.v1"
 )
 
 const (
@@ -62,7 +62,7 @@ func main() {
 		}
 	}()
 
-	producer, err := sarama.NewProducerFromClient(client)
+	producer, err := sarama.NewAsyncProducerFromClient(client)
 	if err != nil {
 		logger.Fatalln("Failed to start Kafka producer:", err)
 	}
@@ -89,7 +89,7 @@ func main() {
 	logger.Printf("Done after %0.2fs.\n", float64(time.Since(started))/float64(time.Second))
 }
 
-func expectationProducer(p sarama.Producer, expectations chan<- *sarama.ProducerMessage, wg *sync.WaitGroup) {
+func expectationProducer(p sarama.AsyncProducer, expectations chan<- *sarama.ProducerMessage, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	var producerWg sync.WaitGroup
@@ -160,13 +160,13 @@ func expectationConsumer(c sarama.Consumer, expectations <-chan *sarama.Producer
 	)
 
 	for expectation := range expectations {
-		partition := expectation.Partition()
+		partition := expectation.Partition
 
 		if partitionVerifiers[partition] == nil {
 			logger.Printf("Starting message verifier for partition %d...\n", partition)
-			pc, err := c.ConsumePartition(*topic, partition, expectation.Offset())
+			pc, err := c.ConsumePartition(*topic, partition, expectation.Offset)
 			if err != nil {
-				logger.Fatalf("Failed to open partition consumer for %s/%d: %s", *topic, expectation.Partition(), err)
+				logger.Fatalf("Failed to open partition consumer for %s/%d: %s", *topic, expectation.Partition, err)
 			}
 
 			partitionExpectations := make(chan *sarama.ProducerMessage)
@@ -197,7 +197,7 @@ func partitionExpectationConsumer(pc sarama.PartitionConsumer, expectations <-ch
 	for expectation := range expectations {
 		msg := <-pc.Messages()
 
-		if msg.Offset != expectation.Offset() {
+		if msg.Offset != expectation.Offset {
 			fmt.Printf("Unexpected offset %d!\n", msg.Offset)
 		}
 

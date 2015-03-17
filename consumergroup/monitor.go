@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/Shopify/sarama"
+	"gopkg.in/Shopify/sarama.v1"
 )
 
 // Keeps track of the status of a consumergroup, i.e. how far the processing is behind
@@ -83,7 +83,7 @@ func (m *Monitor) ProcessingLag() (ConsumerGroupProcessingLag, error) {
 				return nil, err
 			}
 
-			latestOffsetInt, err := m.kafkaConnection.GetOffset(topic, partition, sarama.LatestOffsets)
+			latestOffsetInt, err := m.kafkaConnection.GetOffset(topic, partition, sarama.OffsetNewest)
 			if err != nil {
 				return nil, err
 			}

@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"gopkg.in/Shopify/sarama.v1"
 )
 
 var (
@@ -59,7 +59,7 @@ func main() {
 		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
 	}
 
-	producer, err := sarama.NewProducer(strings.Split(*brokerList, ","), producerConfiguration())
+	producer, err := sarama.NewAsyncProducer(strings.Split(*brokerList, ","), producerConfiguration())
 	if err != nil {
 		log.Fatalln("Failed to start producer:", err)
 	}
