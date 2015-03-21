@@ -294,7 +294,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 		cg.Logf("%s :: FAILED to get list of partitions: %s\n", topic, err)
 		cg.errors <- &sarama.ConsumerError{
 			Topic:     topic,
-			Partition: 0,
+			Partition: -1,
 			Err:       err,
 		}
 		return
