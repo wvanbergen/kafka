@@ -7,16 +7,19 @@ import (
 	"math"
 	"os"
 	"sort"
+
+	"github.com/wvanbergen/kafka/kazoo"
 )
 
 // Divides a set of partitions between a set of consumers.
-func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaderSlice) map[string]partitionLeaderSlice {
-	result := make(map[string]partitionLeaderSlice)
+func dividePartitionsBetweenConsumers(consumers []string, partitions []kazoo.Partition) map[string]PartitionLeaders {
+	result := make(map[string]PartitionLeaders)
 
 	plen := len(partitions)
 	clen := len(consumers)
 
-	sort.Sort(partitions)
+	partitionLeaders := PartitionLeaders(partitions)
+	sort.Sort(partitionLeaders)
 	sort.Strings(consumers)
 
 	n := int(math.Ceil(float64(plen) / float64(clen)))
@@ -37,24 +40,18 @@ func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLe
 	return result
 }
 
-// Partition information
-type partitionLeader struct {
-	id     int32
-	leader int
+// A sortable slice of PartitionLeader structs
+type PartitionLeaders []kazoo.Partition
+
+func (pls PartitionLeaders) Len() int {
+	return len(pls)
 }
 
-// A sortable slice of Partition structs
-type partitionLeaderSlice []partitionLeader
-
-func (s partitionLeaderSlice) Len() int {
-	return len(s)
+func (pls PartitionLeaders) Less(i, j int) bool {
+	return pls[i].Leader < pls[j].Leader || (pls[i].Leader == pls[j].Leader && pls[i].ID < pls[j].ID)
 }
 
-func (s partitionLeaderSlice) Less(i, j int) bool {
-	return s[i].leader < s[j].leader || (s[i].leader == s[j].leader && s[i].id < s[j].id)
-}
-
-func (s partitionLeaderSlice) Swap(i, j int) {
+func (s PartitionLeaders) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
