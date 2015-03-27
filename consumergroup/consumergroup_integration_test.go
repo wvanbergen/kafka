@@ -18,20 +18,21 @@ const (
 )
 
 var (
-	zookeeperAddr []string = []string{"localhost:2181"}
-	kafkaAddr     []string = []string{"localhost:9092"}
+	// By default, assume we're using Sarama's vagrant cluster when running tests
+	zookeeperPeers = []string{"192.168.100.67:2181", "192.168.100.67:2182", "192.168.100.67:2183", "192.168.100.67:2184", "192.168.100.67:2185"}
+	kafkaPeers     = []string{"192.168.100.67:9091", "192.168.100.67:9092", "192.168.100.67:9093", "192.168.100.67:9094", "192.168.100.67:9095"}
 )
 
 func init() {
-	if zookeeperAddrCSV := os.Getenv("ZOOKEEPER_ADDR"); zookeeperAddrCSV != "" {
-		zookeeperAddr = strings.Split(zookeeperAddrCSV, ",")
+	if zookeeperPeersEnv := os.Getenv("ZOOKEEPER_PEERS"); zookeeperPeersEnv != "" {
+		zookeeperPeers = strings.Split(zookeeperPeersEnv, ",")
 	}
-	if kafkaAddrCSV := os.Getenv("KAFKA_ADDR"); kafkaAddrCSV != "" {
-		kafkaAddr = strings.Split(kafkaAddrCSV, ",")
+	if kafkaPeersEnv := os.Getenv("KAFKA_PEERS"); kafkaPeersEnv != "" {
+		kafkaPeers = strings.Split(kafkaPeersEnv, ",")
 	}
 
-	fmt.Printf("Using Zookeeper cluster at %v\n", zookeeperAddr)
-	fmt.Printf("Using Kafka cluster at %v\n", kafkaAddr)
+	fmt.Printf("Using Zookeeper cluster at %v\n", zookeeperPeers)
+	fmt.Printf("Using Kafka cluster at %v\n", kafkaPeers)
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -42,7 +43,7 @@ func ExampleConsumerGroup() {
 	consumer, consumerErr := JoinConsumerGroup(
 		"ExampleConsumerGroup",
 		[]string{TopicWithSinglePartition, TopicWithMultiplePartitions},
-		zookeeperAddr,
+		zookeeperPeers,
 		nil)
 
 	if consumerErr != nil {
@@ -83,7 +84,7 @@ func TestIntegrationMultipleTopicsSingleConsumer(t *testing.T) {
 	go produceEvents(t, consumerGroup, TopicWithSinglePartition, 100)
 	go produceEvents(t, consumerGroup, TopicWithMultiplePartitions, 200)
 
-	consumer, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition, TopicWithMultiplePartitions}, zookeeperAddr, nil)
+	consumer, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition, TopicWithMultiplePartitions}, zookeeperPeers, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,13 +99,13 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 	setupZookeeper(t, consumerGroup, TopicWithMultiplePartitions, 4)
 	go produceEvents(t, consumerGroup, TopicWithMultiplePartitions, 200)
 
-	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeperAddr, nil)
+	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeperPeers, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer consumer1.Close()
 
-	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeperAddr, nil)
+	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithMultiplePartitions}, zookeeperPeers, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +166,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	config := NewConfig()
 	config.ChannelBufferSize = 0
 
-	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeperAddr, config)
+	consumer1, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeperPeers, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 	assertEvents(t, consumer1, 10, offsets)
 	consumer1.Close()
 
-	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeperAddr, nil)
+	consumer2, err := JoinConsumerGroup(consumerGroup, []string{TopicWithSinglePartition}, zookeeperPeers, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +220,7 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 }
 
 func saramaClient() sarama.Client {
-	client, err := sarama.NewClient(kafkaAddr, nil)
+	client, err := sarama.NewClient(kafkaPeers, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -227,7 +228,7 @@ func saramaClient() sarama.Client {
 }
 
 func produceEvents(t *testing.T, consumerGroup string, topic string, amount int64) error {
-	producer, err := sarama.NewSyncProducer(kafkaAddr, nil)
+	producer, err := sarama.NewSyncProducer(kafkaPeers, nil)
 	if err != nil {
 		return err
 	}
@@ -251,7 +252,7 @@ func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions
 
 	// Connect to zookeeper to commit the last seen offset.
 	// This way we should only produce events that we produce ourselves in this test.
-	zk, zkErr := NewZK(zookeeperAddr, "", 1*time.Second)
+	zk, zkErr := NewZK(zookeeperPeers, "", 1*time.Second)
 	if zkErr != nil {
 		t.Fatal(zkErr)
 	}
