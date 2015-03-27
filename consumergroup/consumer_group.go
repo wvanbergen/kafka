@@ -76,7 +76,7 @@ type ConsumerGroup struct {
 	errors   chan *sarama.ConsumerError
 	stopper  chan struct{}
 
-	brokers   map[int]string
+	brokers   map[int32]string
 	consumers []string
 
 	offsetManager OffsetManager
@@ -282,7 +282,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 	cg.Logf("%s :: Started topic consumer\n", topic)
 
 	// Fetch a list of partition IDs
-	partitions, err := cg.kazoo.Partitions(topic)
+	partitions, err := cg.kazoo.Topic(topic).Partitions()
 	if err != nil {
 		cg.Logf("%s :: FAILED to get list of partitions: %s\n", topic, err)
 		cg.errors <- &sarama.ConsumerError{
@@ -293,9 +293,20 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 		return
 	}
 
-	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitions)
+	partitionLeaders, err := retrievePartitionLeaders(partitions)
+	if err != nil {
+		cg.Logf("%s :: FAILED to get leaders of partitions: %s\n", topic, err)
+		cg.errors <- &sarama.ConsumerError{
+			Topic:     topic,
+			Partition: -1,
+			Err:       err,
+		}
+		return
+	}
+
+	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitionLeaders)
 	myPartitions := dividedPartitions[cg.id]
-	cg.Logf("%s :: Claiming %d of %d partitions", topic, len(myPartitions), len(partitions))
+	cg.Logf("%s :: Claiming %d of %d partitions", topic, len(myPartitions), len(partitionLeaders))
 
 	// Consume all the assigned partitions
 	var wg sync.WaitGroup

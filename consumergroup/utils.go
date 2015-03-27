@@ -11,15 +11,30 @@ import (
 	"github.com/wvanbergen/kafka/kazoo"
 )
 
+func retrievePartitionLeaders(partitions map[int32]*kazoo.Partition) (partitionLeaders, error) {
+
+	pls := make(partitionLeaders, 0, len(partitions))
+	for id, partition := range partitions {
+		leader, err := partition.Leader()
+		if err != nil {
+			return nil, err
+		}
+
+		pl := partitionLeader{id: id, leader: leader, partition: partition}
+		pls = append(pls, pl)
+	}
+
+	return pls, nil
+}
+
 // Divides a set of partitions between a set of consumers.
-func dividePartitionsBetweenConsumers(consumers []string, partitions []kazoo.Partition) map[string]PartitionLeaders {
-	result := make(map[string]PartitionLeaders)
+func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaders) map[string][]*kazoo.Partition {
+	result := make(map[string][]*kazoo.Partition)
 
 	plen := len(partitions)
 	clen := len(consumers)
 
-	partitionLeaders := PartitionLeaders(partitions)
-	sort.Sort(partitionLeaders)
+	sort.Sort(partitions)
 	sort.Strings(consumers)
 
 	n := int(math.Ceil(float64(plen) / float64(clen)))
@@ -34,24 +49,32 @@ func dividePartitionsBetweenConsumers(consumers []string, partitions []kazoo.Par
 			last = plen
 		}
 
-		result[consumer] = partitions[first:last]
+		for _, pl := range partitions[first:last] {
+			result[consumer] = append(result[consumer], pl.partition)
+		}
 	}
 
 	return result
 }
 
-// A sortable slice of PartitionLeader structs
-type PartitionLeaders []kazoo.Partition
+type partitionLeader struct {
+	id        int32
+	leader    int32
+	partition *kazoo.Partition
+}
 
-func (pls PartitionLeaders) Len() int {
+// A sortable slice of PartitionLeader structs
+type partitionLeaders []partitionLeader
+
+func (pls partitionLeaders) Len() int {
 	return len(pls)
 }
 
-func (pls PartitionLeaders) Less(i, j int) bool {
-	return pls[i].Leader < pls[j].Leader || (pls[i].Leader == pls[j].Leader && pls[i].ID < pls[j].ID)
+func (pls partitionLeaders) Less(i, j int) bool {
+	return pls[i].leader < pls[j].leader || (pls[i].leader == pls[j].leader && pls[i].id < pls[j].id)
 }
 
-func (s PartitionLeaders) Swap(i, j int) {
+func (s partitionLeaders) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 

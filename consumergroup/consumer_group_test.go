@@ -12,11 +12,11 @@ func Test_PartitionDivision(t *testing.T) {
 		"consumer2",
 	}
 
-	partitions := []kazoo.Partition{
-		kazoo.Partition{ID: 0, Leader: 1},
-		kazoo.Partition{ID: 1, Leader: 2},
-		kazoo.Partition{ID: 2, Leader: 1},
-		kazoo.Partition{ID: 3, Leader: 2},
+	partitions := []partitionLeader{
+		partitionLeader{id: 0, leader: 1, partition: &kazoo.Partition{ID: 0}},
+		partitionLeader{id: 1, leader: 2, partition: &kazoo.Partition{ID: 1}},
+		partitionLeader{id: 2, leader: 1, partition: &kazoo.Partition{ID: 2}},
+		partitionLeader{id: 3, leader: 2, partition: &kazoo.Partition{ID: 3}},
 	}
 
 	division := dividePartitionsBetweenConsumers(consumers, partitions)

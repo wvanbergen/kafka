@@ -15,12 +15,16 @@ var (
 	FailedToClaimPartition = errors.New("Failed to claim partition for this consumer instance. Do you have a rogue consumer running?")
 )
 
+type Topic struct {
+	Name string
+	kz   *Kazoo
+}
+
 // Partition information
 type Partition struct {
-	Topic  string
-	ID     int32
-	Leader int32   `json:"leader"`
-	ISR    []int32 `json:"isr"`
+	topic    *Topic
+	ID       int32
+	Replicas []int32
 }
 
 // Kazoo interacts with the Kafka metadata in Zookeeper
@@ -55,7 +59,7 @@ func NewKazoo(servers []string, conf *Config) (*Kazoo, error) {
  * HIGH LEVEL API
  *******************************************************************/
 
-func (kz *Kazoo) Brokers() (map[int]string, error) {
+func (kz *Kazoo) Brokers() (map[int32]string, error) {
 	root := fmt.Sprintf("%s/brokers/ids", kz.conf.Chroot)
 	children, _, err := kz.conn.Children(root)
 	if err != nil {
@@ -67,7 +71,7 @@ func (kz *Kazoo) Brokers() (map[int]string, error) {
 		Port int    `json:"port"`
 	}
 
-	result := make(map[int]string)
+	result := make(map[int32]string)
 	for _, child := range children {
 		brokerID, err := strconv.ParseInt(child, 10, 32)
 		if err != nil {
@@ -84,55 +88,119 @@ func (kz *Kazoo) Brokers() (map[int]string, error) {
 			return nil, err
 		}
 
-		result[int(brokerID)] = fmt.Sprintf("%s:%d", brokerNode.Host, brokerNode.Port)
+		result[int32(brokerID)] = fmt.Sprintf("%s:%d", brokerNode.Host, brokerNode.Port)
 	}
 
 	return result, nil
 }
 
-func (kz *Kazoo) Topics() ([]string, error) {
+func (kz *Kazoo) Topics() (map[string]*Topic, error) {
 	root := fmt.Sprintf("%s/brokers/topics", kz.conf.Chroot)
 	children, _, err := kz.conn.Children(root)
 	if err != nil {
 		return nil, err
 	}
 
-	var result []string
-	for _, child := range children {
-		result = append(result, child)
+	result := make(map[string]*Topic)
+	for _, name := range children {
+		result[name] = kz.Topic(name)
+	}
+	return result, nil
+}
+
+func (kz *Kazoo) Topic(topic string) *Topic {
+	return &Topic{Name: topic, kz: kz}
+}
+
+func (t *Topic) Partitions() (map[int32]*Partition, error) {
+	node := fmt.Sprintf("%s/brokers/topics/%s", t.kz.conf.Chroot, t.Name)
+	value, _, err := t.kz.conn.Get(node)
+	if err != nil {
+		return nil, err
+	}
+
+	type topicMetadata struct {
+		Partitions map[string][]int32 `json:"partitions"`
+	}
+
+	var tm topicMetadata
+	if err := json.Unmarshal(value, &tm); err != nil {
+		return nil, err
+	}
+
+	result := make(map[int32]*Partition)
+	for partitionNumber, replicas := range tm.Partitions {
+		partitionID, err := strconv.ParseInt(partitionNumber, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		replicaIDs := make([]int32, 0, len(replicas))
+		for _, r := range replicas {
+			replicaIDs = append(replicaIDs, int32(r))
+		}
+
+		result[int32(partitionID)] = t.Partition(int32(partitionID), replicaIDs)
 	}
 
 	return result, nil
 }
 
-func (kz *Kazoo) Partitions(topic string) ([]Partition, error) {
-	root := fmt.Sprintf("%s/brokers/topics/%s/partitions", kz.conf.Chroot, topic)
-	children, _, err := kz.conn.Children(root)
+func (t *Topic) Partition(id int32, replicas []int32) *Partition {
+	return &Partition{ID: id, Replicas: replicas, topic: t}
+}
+
+func (t *Topic) Config() (map[string]string, error) {
+	value, _, err := t.kz.conn.Get(fmt.Sprintf("%s/config/topics/%s", t.kz.conf.Chroot, t.Name))
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]Partition, 0, len(children))
-	for _, child := range children {
-		partitionNumber, err := strconv.ParseInt(child, 10, 32)
-		if err != nil {
-			return nil, err
-		}
-
-		value, _, err := kz.conn.Get(path.Join(root, child, "state"))
-		if err != nil {
-			return nil, err
-		}
-
-		partition := Partition{Topic: topic, ID: int32(partitionNumber)}
-		if err := json.Unmarshal(value, &partition); err != nil {
-			return nil, err
-		}
-
-		result = append(result, partition)
+	var topicConfig struct {
+		ConfigMap map[string]string `json:"config"`
 	}
 
-	return result, nil
+	if err := json.Unmarshal(value, &topicConfig); err != nil {
+		return nil, err
+	}
+
+	return topicConfig.ConfigMap, nil
+}
+
+type partitionState struct {
+	Leader int32   `json:"leader"`
+	ISR    []int32 `json:"isr"`
+}
+
+func (p *Partition) state() (partitionState, error) {
+	var state partitionState
+	node := fmt.Sprintf("%s/brokers/topics/%s/partitions/%d/state", p.topic.kz.conf.Chroot, p.topic.Name, p.ID)
+	value, _, err := p.topic.kz.conn.Get(node)
+	if err != nil {
+		return state, err
+	}
+
+	if err := json.Unmarshal(value, &state); err != nil {
+		return state, err
+	}
+
+	return state, nil
+}
+
+func (p *Partition) Leader() (int32, error) {
+	if state, err := p.state(); err != nil {
+		return -1, err
+	} else {
+		return state.Leader, nil
+	}
+}
+
+func (p *Partition) ISR() ([]int32, error) {
+	if state, err := p.state(); err != nil {
+		return nil, err
+	} else {
+		return state.ISR, nil
+	}
 }
 
 // Consumers returns all active consumers within a group
