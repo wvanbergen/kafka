@@ -19,7 +19,8 @@ var (
 type Partition struct {
 	Topic  string
 	ID     int32
-	Leader int32
+	Leader int32   `json:"leader"`
+	ISR    []int32 `json:"isr"`
 }
 
 // Kazoo interacts with the Kafka metadata in Zookeeper
@@ -89,23 +90,19 @@ func (kz *Kazoo) Brokers() (map[int]string, error) {
 	return result, nil
 }
 
-// Consumers returns all active consumers within a group
-func (kz *Kazoo) Consumers(group string) ([]string, <-chan zk.Event, error) {
-	root := fmt.Sprintf("%s/consumers/%s/ids", kz.conf.Chroot, group)
-	err := kz.mkdirRecursive(root)
+func (kz *Kazoo) Topics() ([]string, error) {
+	root := fmt.Sprintf("%s/brokers/topics", kz.conf.Chroot)
+	children, _, err := kz.conn.Children(root)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	strs, _, ch, err := kz.conn.ChildrenW(root)
-	if err != nil {
-		return nil, nil, err
+	var result []string
+	for _, child := range children {
+		result = append(result, child)
 	}
-	return strs, ch, nil
-}
 
-func (kz *Kazoo) Topics(topic string) ([]string, error) {
-	return nil, nil
+	return result, nil
 }
 
 func (kz *Kazoo) Partitions(topic string) ([]Partition, error) {
@@ -113,10 +110,6 @@ func (kz *Kazoo) Partitions(topic string) ([]Partition, error) {
 	children, _, err := kz.conn.Children(root)
 	if err != nil {
 		return nil, err
-	}
-
-	type partitionEntry struct {
-		Leader int32 `json:"leader"`
 	}
 
 	result := make([]Partition, 0, len(children))
@@ -131,19 +124,30 @@ func (kz *Kazoo) Partitions(topic string) ([]Partition, error) {
 			return nil, err
 		}
 
-		var partitionNode partitionEntry
-		if err := json.Unmarshal(value, &partitionNode); err != nil {
+		partition := Partition{Topic: topic, ID: int32(partitionNumber)}
+		if err := json.Unmarshal(value, &partition); err != nil {
 			return nil, err
 		}
 
-		result = append(result, Partition{
-			Topic:  topic,
-			ID:     int32(partitionNumber),
-			Leader: partitionNode.Leader,
-		})
+		result = append(result, partition)
 	}
 
 	return result, nil
+}
+
+// Consumers returns all active consumers within a group
+func (kz *Kazoo) Consumers(group string) ([]string, <-chan zk.Event, error) {
+	root := fmt.Sprintf("%s/consumers/%s/ids", kz.conf.Chroot, group)
+	err := kz.mkdirRecursive(root)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	strs, _, ch, err := kz.conn.ChildrenW(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	return strs, ch, nil
 }
 
 // Claim claims a topic/partition ownership for a consumer ID within a group
@@ -250,8 +254,9 @@ func (kz *Kazoo) DeregisterConsumer(group, id string) error {
 	return kz.conn.Delete(fmt.Sprintf("%s/consumers/%s/ids/%s", kz.conf.Chroot, group, id), 0)
 }
 
-func (kz *Kazoo) Close() {
+func (kz *Kazoo) Close() error {
 	kz.conn.Close()
+	return nil
 }
 
 /*******************************************************************
