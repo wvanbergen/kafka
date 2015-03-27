@@ -7,11 +7,29 @@ import (
 	"math"
 	"os"
 	"sort"
+
+	"github.com/wvanbergen/kafka/kazoo"
 )
 
+func retrievePartitionLeaders(partitions map[int32]*kazoo.Partition) (partitionLeaders, error) {
+
+	pls := make(partitionLeaders, 0, len(partitions))
+	for id, partition := range partitions {
+		leader, err := partition.Leader()
+		if err != nil {
+			return nil, err
+		}
+
+		pl := partitionLeader{id: id, leader: leader, partition: partition}
+		pls = append(pls, pl)
+	}
+
+	return pls, nil
+}
+
 // Divides a set of partitions between a set of consumers.
-func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaderSlice) map[string]partitionLeaderSlice {
-	result := make(map[string]partitionLeaderSlice)
+func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaders) map[string][]*kazoo.Partition {
+	result := make(map[string][]*kazoo.Partition)
 
 	plen := len(partitions)
 	clen := len(consumers)
@@ -31,30 +49,32 @@ func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLe
 			last = plen
 		}
 
-		result[consumer] = partitions[first:last]
+		for _, pl := range partitions[first:last] {
+			result[consumer] = append(result[consumer], pl.partition)
+		}
 	}
 
 	return result
 }
 
-// Partition information
 type partitionLeader struct {
-	id     int32
-	leader int
+	id        int32
+	leader    int32
+	partition *kazoo.Partition
 }
 
-// A sortable slice of Partition structs
-type partitionLeaderSlice []partitionLeader
+// A sortable slice of PartitionLeader structs
+type partitionLeaders []partitionLeader
 
-func (s partitionLeaderSlice) Len() int {
-	return len(s)
+func (pls partitionLeaders) Len() int {
+	return len(pls)
 }
 
-func (s partitionLeaderSlice) Less(i, j int) bool {
-	return s[i].leader < s[j].leader || (s[i].leader == s[j].leader && s[i].id < s[j].id)
+func (pls partitionLeaders) Less(i, j int) bool {
+	return pls[i].leader < pls[j].leader || (pls[i].leader == pls[j].leader && pls[i].id < pls[j].id)
 }
 
-func (s partitionLeaderSlice) Swap(i, j int) {
+func (s partitionLeaders) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 

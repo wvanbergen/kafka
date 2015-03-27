@@ -109,7 +109,7 @@ func (zom *zookeeperOffsetManager) InitializePartition(topic string, partition i
 		zom.offsets[topic] = make(topicOffsets)
 	}
 
-	nextOffset, err := zom.cg.zk.Offset(zom.cg.name, topic, partition)
+	nextOffset, err := zom.cg.kazoo.FetchOffset(zom.cg.name, topic, partition)
 	if err != nil {
 		return 0, err
 	}
@@ -205,7 +205,7 @@ func (zom *zookeeperOffsetManager) commitOffsets() error {
 
 func (zom *zookeeperOffsetManager) commitOffset(topic string, partition int32, tracker *partitionOffsetTracker) error {
 	err := tracker.commit(func(offset int64) error {
-		return zom.cg.zk.Commit(zom.cg.name, topic, partition, offset+1)
+		return zom.cg.kazoo.CommitOffset(zom.cg.name, topic, partition, offset+1)
 	})
 
 	if err != nil {
