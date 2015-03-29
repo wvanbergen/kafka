@@ -21,11 +21,13 @@ var (
 	ErrPartitionNotClaimed       = errors.New("Cannot release partition: it is not claimed by this instance")
 )
 
+// Consumergroup represents a high-level consumer that is registered in Zookeeper,
 type Consumergroup struct {
 	kz   *Kazoo
 	Name string
 }
 
+// ConsumergroupInstance represents an instance of a Consumergroup.
 type ConsumergroupInstance struct {
 	cg *Consumergroup
 	ID string

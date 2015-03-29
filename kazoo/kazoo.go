@@ -21,11 +21,17 @@ type Kazoo struct {
 	conf *Config
 }
 
+// Config holds configuration values f.
 type Config struct {
-	Chroot  string
+	// The chroot the Kafka installation is registerde under. Defaults to "".
+	Chroot string
+
+	// The amount of time the Zookeeper client can be disconnected from the Zookeeper cluster
+	// before the cluster will get rid of watches and ephemeral nodes. Defaults to 1 second.
 	Timeout time.Duration
 }
 
+// NewConfig instantiates a new Config struct with sane defaults.
 func NewConfig() *Config {
 	return &Config{Timeout: 1 * time.Second}
 }
@@ -43,6 +49,8 @@ func NewKazoo(servers []string, conf *Config) (*Kazoo, error) {
 	return &Kazoo{conn, conf}, nil
 }
 
+// Brokers returns a map of all the brokers that make part of the
+// Kafka cluster that is regeistered in Zookeeper.
 func (kz *Kazoo) Brokers() (map[int32]string, error) {
 	root := fmt.Sprintf("%s/brokers/ids", kz.conf.Chroot)
 	children, _, err := kz.conn.Children(root)

@@ -6,19 +6,20 @@ import (
 	"strconv"
 )
 
-// Topic metadata
+// Topic interacts with Kafka's topic metadata in Zookeeper.
 type Topic struct {
 	Name string
 	kz   *Kazoo
 }
 
-// Partition metadata
+// Partition interacts with Kafka's partition metadata in Zookeeper.
 type Partition struct {
 	topic    *Topic
 	ID       int32
 	Replicas []int32
 }
 
+// Topics returns a map of all registered Kafka topics.
 func (kz *Kazoo) Topics() (map[string]*Topic, error) {
 	root := fmt.Sprintf("%s/brokers/topics", kz.conf.Chroot)
 	children, _, err := kz.conn.Children(root)
@@ -33,10 +34,12 @@ func (kz *Kazoo) Topics() (map[string]*Topic, error) {
 	return result, nil
 }
 
+// Topic returns a Topic instance for a given topic name
 func (kz *Kazoo) Topic(topic string) *Topic {
 	return &Topic{Name: topic, kz: kz}
 }
 
+// Partitions returns a map of all partitions for the topic.
 func (t *Topic) Partitions() (map[int32]*Partition, error) {
 	node := fmt.Sprintf("%s/brokers/topics/%s", t.kz.conf.Chroot, t.Name)
 	value, _, err := t.kz.conn.Get(node)
@@ -71,10 +74,12 @@ func (t *Topic) Partitions() (map[int32]*Partition, error) {
 	return result, nil
 }
 
+// Partition returns a Partition instance for the topic.
 func (t *Topic) Partition(id int32, replicas []int32) *Partition {
 	return &Partition{ID: id, Replicas: replicas, topic: t}
 }
 
+// Config returns topic-level configuration settings as a map.
 func (t *Topic) Config() (map[string]string, error) {
 	value, _, err := t.kz.conn.Get(fmt.Sprintf("%s/config/topics/%s", t.kz.conf.Chroot, t.Name))
 	if err != nil {
@@ -90,6 +95,24 @@ func (t *Topic) Config() (map[string]string, error) {
 	}
 
 	return topicConfig.ConfigMap, nil
+}
+
+// Leader returns the broker ID of the broker that is currently the leader for the partition.
+func (p *Partition) Leader() (int32, error) {
+	if state, err := p.state(); err != nil {
+		return -1, err
+	} else {
+		return state.Leader, nil
+	}
+}
+
+// ISR returns the broker IDs of the current in-sync replica set for the partition
+func (p *Partition) ISR() ([]int32, error) {
+	if state, err := p.state(); err != nil {
+		return nil, err
+	} else {
+		return state.ISR, nil
+	}
 }
 
 type partitionState struct {
@@ -110,20 +133,4 @@ func (p *Partition) state() (partitionState, error) {
 	}
 
 	return state, nil
-}
-
-func (p *Partition) Leader() (int32, error) {
-	if state, err := p.state(); err != nil {
-		return -1, err
-	} else {
-		return state.Leader, nil
-	}
-}
-
-func (p *Partition) ISR() ([]int32, error) {
-	if state, err := p.state(); err != nil {
-		return nil, err
-	} else {
-		return state.ISR, nil
-	}
 }
