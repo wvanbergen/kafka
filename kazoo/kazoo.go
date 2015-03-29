@@ -78,6 +78,26 @@ func (kz *Kazoo) Brokers() (map[int32]string, error) {
 	return result, nil
 }
 
+// Controller returns what broker is currently acting as controller of the Kafka cluster
+func (kz *Kazoo) Controller() (int32, error) {
+	type controllerEntry struct {
+		BrokerID int32 `json:"brokerid"`
+	}
+
+	node := fmt.Sprintf("%s/controller", kz.conf.Chroot)
+	data, _, err := kz.conn.Get(node)
+	if err != nil {
+		return -1, err
+	}
+
+	var controllerNode controllerEntry
+	if err := json.Unmarshal(data, &controllerNode); err != nil {
+		return -1, err
+	}
+
+	return controllerNode.BrokerID, nil
+}
+
 func (kz *Kazoo) Close() error {
 	kz.conn.Close()
 	return nil

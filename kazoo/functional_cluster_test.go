@@ -47,3 +47,26 @@ func TestBrokers(t *testing.T) {
 
 	assertSuccessfulClose(t, kz)
 }
+
+func TestController(t *testing.T) {
+	kz, err := NewKazoo(zookeeperPeers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	brokers, err := kz.Brokers()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controller, err := kz.Controller()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := brokers[controller]; !ok {
+		t.Error("Expected the controller's BrokerID to be an existing one")
+	}
+
+	assertSuccessfulClose(t, kz)
+}
