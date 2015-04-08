@@ -235,6 +235,21 @@ func (cg *Consumergroup) CommitOffset(topic string, partition int32, offset int6
 	}
 }
 
+// Topics retrieves the list of topics the consumergroup has claimed ownership of at some point.
+func (cg *Consumergroup) Topics() (map[string]*Topic, error) {
+	root := fmt.Sprintf("%s/consumers/%s/owners", cg.kz.conf.Chroot, cg.Name)
+	children, _, err := cg.kz.conn.Children(root)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*Topic)
+	for _, name := range children {
+		result[name] = cg.kz.Topic(name)
+	}
+	return result, nil
+}
+
 // FetchOffset retrieves an offset to a group/topic/partition
 func (cg *Consumergroup) FetchOffset(topic string, partition int32) (int64, error) {
 	node := fmt.Sprintf("%s/consumers/%s/offsets/%s/%d", cg.kz.conf.Chroot, cg.Name, topic, partition)
