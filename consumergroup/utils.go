@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"sort"
 
@@ -37,7 +36,10 @@ func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLe
 	sort.Sort(partitions)
 	sort.Strings(consumers)
 
-	n := int(math.Ceil(float64(plen) / float64(clen)))
+	n := plen / clen
+	if plen%clen > 0 {
+		n++
+	}
 	for i, consumer := range consumers {
 		first := i * n
 		if first > plen {
