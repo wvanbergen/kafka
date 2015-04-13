@@ -6,6 +6,7 @@ Kafka libraries, tools and example applications built on top of the
 ### Libraries
 
 - **consumergroup**: Distributed Kafka consumer, backed by Zookeeper, supporting load balancing and offset persistence, as defined by the [Kafka documentation](https://kafka.apache.org/documentation.html#distributionimpl). API documentation can be found on [godoc.org](http://godoc.org/github.com/wvanbergen/kafka/consumergroup)
+- **kazoo**: Library to interact with Kafka cluster metadata in Zookeeper.
 
 ### Tools
 
