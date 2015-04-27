@@ -260,25 +260,26 @@ func (kz *Kazoo) ReleasePartition(group, topic string, partition int32, id strin
 }
 
 // CommitOffset commits an offset to a group/topic/partition
-func (kz *Kazoo) CommitOffset(group, topic string, partition int32, offset int64) (err error) {
-	root := fmt.Sprintf("%s/consumers/%s/offsets/%s", kz.conf.Chroot, group, topic)
-	if err = kz.mkdirRecursive(root); err != nil {
-		return err
-	}
-
-	node := fmt.Sprintf("%s/%d", root, partition)
+func (kz *Kazoo) CommitOffset(group, topic string, partition int32, offset int64) error {
+	node := fmt.Sprintf("%s/consumers/%s/offsets/%s/%d", kz.conf.Chroot, group, topic, partition)
 	data := []byte(fmt.Sprintf("%d", offset))
-	_, stat, err := kz.conn.Get(node)
 
-	// Try to create new node
-	if err == zk.ErrNoNode {
-		return kz.create(node, data, false)
-	} else if err != nil {
+	// get current info for node
+	_, stat, err := kz.conn.Get(node)
+	if err != nil {
+		if err == zk.ErrNoNode {
+			// Node doesn't exist; try to create it
+			return kz.create(node, data, false)
+		}
 		return err
 	}
 
+	// update the existing node
 	_, err = kz.conn.Set(node, data, stat.Version)
-	return
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // FetchOffset retrieves an offset to a group/topic/partition
