@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wvanbergen/kafka/kazoo"
+	"github.com/wvanbergen/kazoo-go"
 	"gopkg.in/Shopify/sarama.v1"
 )
 
@@ -62,12 +62,12 @@ func (cgc *Config) Validate() error {
 // The ConsumerGroup type holds all the information for a consumer that is part
 // of a consumer group. Call JoinConsumerGroup to start a consumer.
 type ConsumerGroup struct {
-	id, name string
-
 	config *Config
 
 	consumer sarama.Consumer
 	kazoo    *kazoo.Kazoo
+	group    *kazoo.Consumergroup
+	instance *kazoo.ConsumergroupInstance
 
 	wg             sync.WaitGroup
 	singleShutdown sync.Once
@@ -76,8 +76,7 @@ type ConsumerGroup struct {
 	errors   chan *sarama.ConsumerError
 	stopper  chan struct{}
 
-	brokers   map[int32]string
-	consumers []string
+	consumers kazoo.ConsumergroupInstanceList
 
 	offsetManager OffsetManager
 }
@@ -112,55 +111,56 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		return
 	}
 
-	brokers, err := kz.Brokers()
+	brokers, err := kz.BrokerList()
 	if err != nil {
 		kz.Close()
 		return
 	}
 
-	brokerList := make([]string, 0, len(brokers))
-	for _, broker := range brokers {
-		brokerList = append(brokerList, broker)
-	}
+	group := kz.Consumergroup(name)
+	instance := group.NewInstance()
 
 	var consumer sarama.Consumer
-	if consumer, err = sarama.NewConsumer(brokerList, config.Config); err != nil {
-		kz.Close()
-		return
-	}
-
-	var consumerID string
-	consumerID, err = generateConsumerID()
-	if err != nil {
-		consumer.Close()
+	if consumer, err = sarama.NewConsumer(brokers, config.Config); err != nil {
 		kz.Close()
 		return
 	}
 
 	cg = &ConsumerGroup{
-		id:       consumerID,
-		name:     name,
 		config:   config,
-		brokers:  brokers,
 		consumer: consumer,
+
 		kazoo:    kz,
+		group:    group,
+		instance: instance,
+
 		messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
 		errors:   make(chan *sarama.ConsumerError, config.ChannelBufferSize),
 		stopper:  make(chan struct{}),
 	}
 
 	// Register consumer group
-	if err = kz.RegisterGroup(name); err != nil {
-		cg.Logf("FAILED to register consumer group: %s!\n", err)
-		return
+	if exists, err := cg.group.Exists(); err != nil {
+		cg.Logf("FAILED to check for existence of consumergroup: %s!\n", err)
+		_ = consumer.Close()
+		_ = kz.Close()
+		return nil, err
+	} else if !exists {
+		cg.Logf("Consumergroup `%s` does not yet exists, creating...\n", cg.group.Name)
+		if err := cg.group.Create(); err != nil {
+			cg.Logf("FAILED to create consumergroup in Zookeeper: %s!\n", err)
+			_ = consumer.Close()
+			_ = kz.Close()
+			return nil, err
+		}
 	}
 
 	// Register itself with zookeeper
-	if err = kz.RegisterConsumer(name, consumerID, topics); err != nil {
+	if err := cg.instance.Register(topics); err != nil {
 		cg.Logf("FAILED to register consumer instance: %s!\n", err)
-		return
+		return nil, err
 	} else {
-		cg.Logf("Consumer instance registered (%s).", cg.id)
+		cg.Logf("Consumer instance registered (%s).", cg.instance.ID)
 	}
 
 	offsetConfig := OffsetManagerConfig{CommitInterval: config.Offsets.CommitInterval}
@@ -182,7 +182,7 @@ func (cg *ConsumerGroup) Errors() <-chan *sarama.ConsumerError {
 }
 
 func (cg *ConsumerGroup) Closed() bool {
-	return cg.id == ""
+	return cg.instance == nil
 }
 
 func (cg *ConsumerGroup) Close() error {
@@ -199,10 +199,10 @@ func (cg *ConsumerGroup) Close() error {
 			cg.Logf("FAILED closing the offset manager: %s!\n", err)
 		}
 
-		if shutdownError = cg.kazoo.DeregisterConsumer(cg.name, cg.id); shutdownError != nil {
+		if shutdownError = cg.instance.Deregister(); shutdownError != nil {
 			cg.Logf("FAILED deregistering consumer instance: %s!\n", shutdownError)
 		} else {
-			cg.Logf("Deregistered consumer instance %s.\n", cg.id)
+			cg.Logf("Deregistered consumer instance %s.\n", cg.instance.ID)
 		}
 
 		if shutdownError = cg.consumer.Close(); shutdownError != nil {
@@ -211,8 +211,7 @@ func (cg *ConsumerGroup) Close() error {
 
 		close(cg.messages)
 		close(cg.errors)
-		cg.id = ""
-
+		cg.instance = nil
 	})
 
 	return shutdownError
@@ -220,12 +219,12 @@ func (cg *ConsumerGroup) Close() error {
 
 func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 	var identifier string
-	if cg.id == "" {
+	if cg.instance == nil {
 		identifier = "(defunct)"
 	} else {
-		identifier = cg.id[len(cg.id)-12:]
+		identifier = cg.instance.ID[len(cg.instance.ID)-12:]
 	}
-	sarama.Logger.Printf("[%s/%s] %s", cg.name, identifier, fmt.Sprintf(format, args...))
+	sarama.Logger.Printf("[%s/%s] %s", cg.group.Name, identifier, fmt.Sprintf(format, args...))
 }
 
 func (cg *ConsumerGroup) CommitUpto(message *sarama.ConsumerMessage) error {
@@ -241,7 +240,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 		default:
 		}
 
-		consumers, consumerChanges, err := cg.kazoo.Consumers(cg.name)
+		consumers, consumerChanges, err := cg.group.WatchInstances()
 		if err != nil {
 			cg.Logf("FAILED to get list of registered consumer instances: %s\n", err)
 			return
@@ -305,7 +304,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 	}
 
 	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitionLeaders)
-	myPartitions := dividedPartitions[cg.id]
+	myPartitions := dividedPartitions[cg.instance.ID]
 	cg.Logf("%s :: Claiming %d of %d partitions", topic, len(myPartitions), len(partitionLeaders))
 
 	// Consume all the assigned partitions
@@ -330,12 +329,12 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 	default:
 	}
 
-	err := cg.kazoo.ClaimPartition(cg.name, topic, partition, cg.id)
+	err := cg.instance.ClaimPartition(topic, partition)
 	if err != nil {
 		cg.Logf("%s/%d :: FAILED to claim the partition: %s\n", topic, partition, err)
 		return
 	}
-	defer cg.kazoo.ReleasePartition(cg.name, topic, partition, cg.id)
+	defer cg.instance.ReleasePartition(topic, partition)
 
 	nextOffset, err := cg.offsetManager.InitializePartition(topic, partition)
 	if err != nil {

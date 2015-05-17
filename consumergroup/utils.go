@@ -7,19 +7,19 @@ import (
 	"os"
 	"sort"
 
-	"github.com/wvanbergen/kafka/kazoo"
+	"github.com/wvanbergen/kazoo-go"
 )
 
-func retrievePartitionLeaders(partitions map[int32]*kazoo.Partition) (partitionLeaders, error) {
+func retrievePartitionLeaders(partitions kazoo.PartitionList) (partitionLeaders, error) {
 
 	pls := make(partitionLeaders, 0, len(partitions))
-	for id, partition := range partitions {
+	for _, partition := range partitions {
 		leader, err := partition.Leader()
 		if err != nil {
 			return nil, err
 		}
 
-		pl := partitionLeader{id: id, leader: leader, partition: partition}
+		pl := partitionLeader{id: partition.ID, leader: leader, partition: partition}
 		pls = append(pls, pl)
 	}
 
@@ -27,14 +27,14 @@ func retrievePartitionLeaders(partitions map[int32]*kazoo.Partition) (partitionL
 }
 
 // Divides a set of partitions between a set of consumers.
-func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLeaders) map[string][]*kazoo.Partition {
+func dividePartitionsBetweenConsumers(consumers kazoo.ConsumergroupInstanceList, partitions partitionLeaders) map[string][]*kazoo.Partition {
 	result := make(map[string][]*kazoo.Partition)
 
 	plen := len(partitions)
 	clen := len(consumers)
 
 	sort.Sort(partitions)
-	sort.Strings(consumers)
+	sort.Sort(consumers)
 
 	n := plen / clen
 	if plen%clen > 0 {
@@ -52,7 +52,7 @@ func dividePartitionsBetweenConsumers(consumers []string, partitions partitionLe
 		}
 
 		for _, pl := range partitions[first:last] {
-			result[consumer] = append(result[consumer], pl.partition)
+			result[consumer.ID] = append(result[consumer.ID], pl.partition)
 		}
 	}
 
