@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wvanbergen/kafka/kazoo"
+	"github.com/wvanbergen/kazoo-go"
 	"gopkg.in/Shopify/sarama.v1"
 )
 
@@ -259,6 +259,7 @@ func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions
 	}
 	defer kz.Close()
 
+	group := kz.Consumergroup(consumerGroup)
 	for partition := int32(0); partition < partitions; partition++ {
 		// Retrieve the offset that Sarama will use for the next message on the topic/partition.
 		nextOffset, offsetErr := client.GetOffset(topic, partition, sarama.OffsetNewest)
@@ -268,7 +269,7 @@ func setupZookeeper(t *testing.T, consumerGroup string, topic string, partitions
 			t.Logf("Next offset for %s/%d = %d", topic, partition, nextOffset)
 		}
 
-		if err := kz.CommitOffset(consumerGroup, topic, partition, nextOffset); err != nil {
+		if err := group.CommitOffset(topic, partition, nextOffset); err != nil {
 			t.Fatal(err)
 		}
 	}

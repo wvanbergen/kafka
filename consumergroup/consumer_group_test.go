@@ -1,15 +1,15 @@
 package consumergroup
 
 import (
-	"github.com/wvanbergen/kafka/kazoo"
+	"github.com/wvanbergen/kazoo-go"
 	"testing"
 )
 
 func Test_PartitionDivision(t *testing.T) {
 
-	consumers := []string{
-		"consumer1",
-		"consumer2",
+	consumers := kazoo.ConsumergroupInstanceList{
+		&kazoo.ConsumergroupInstance{ID: "consumer1"},
+		&kazoo.ConsumergroupInstance{ID: "consumer2"},
 	}
 
 	partitions := []partitionLeader{
