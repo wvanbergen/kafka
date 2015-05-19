@@ -354,6 +354,21 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 	}
 
 	consumer, err := cg.consumer.ConsumePartition(topic, partition, nextOffset)
+	if (err == sarama.ErrOffsetOutOfRange) {
+		cg.Logf("%s/%d :: Partition consumer offset out of Range.\n", topic, partition)
+		// if the offset is out of range, simplistically decide whether to use OffsetNewest or OffsetOldest
+		// if the configuration specified offsetOldest, then switch to the oldest available offset, else
+		// switch to the newest available offset. 
+		if (cg.config.Offsets.Initial == sarama.OffsetOldest) {
+			nextOffset = sarama.OffsetOldest
+			cg.Logf("%s/%d :: Partition consumer offset reset to oldest available offset.\n", topic, partition)
+		} else {
+			nextOffset = sarama.OffsetNewest
+			cg.Logf("%s/%d :: Partition consumer offset reset to newest available offset.\n", topic, partition)
+		}
+		// retry the consumePartition with the adjusted offset
+		consumer, err = cg.consumer.ConsumePartition(topic, partition, nextOffset)
+	}
 	if err != nil {
 		cg.Logf("%s/%d :: FAILED to start partition consumer: %s\n", topic, partition, err)
 		return
