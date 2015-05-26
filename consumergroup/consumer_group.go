@@ -227,6 +227,10 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 	sarama.Logger.Printf("[%s/%s] %s", cg.group.Name, identifier, fmt.Sprintf(format, args...))
 }
 
+func (cg *ConsumerGroup) InstanceRegistered() (bool, error) {
+	return cg.instance.Registered()
+}
+
 func (cg *ConsumerGroup) CommitUpto(message *sarama.ConsumerMessage) error {
 	cg.offsetManager.MarkAsProcessed(message.Topic, message.Partition, message.Offset)
 	return nil
