@@ -333,10 +333,15 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 	default:
 	}
 
-	err := cg.instance.ClaimPartition(topic, partition)
-	if err != nil {
-		cg.Logf("%s/%d :: FAILED to claim the partition: %s\n", topic, partition, err)
-		return
+	for maxRetries, tries := 3, 0; tries < maxRetries; tries++ {
+		if err := cg.instance.ClaimPartition(topic, partition); err == nil {
+			break
+		} else if err == kazoo.ErrPartitionClaimedByOther && tries+1 < maxRetries {
+			time.Sleep(1 * time.Second)
+		} else {
+			cg.Logf("%s/%d :: FAILED to claim the partition: %s\n", topic, partition, err)
+			return
+		}
 	}
 	defer cg.instance.ReleasePartition(topic, partition)
 
@@ -358,12 +363,12 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 	}
 
 	consumer, err := cg.consumer.ConsumePartition(topic, partition, nextOffset)
-	if (err == sarama.ErrOffsetOutOfRange) {
+	if err == sarama.ErrOffsetOutOfRange {
 		cg.Logf("%s/%d :: Partition consumer offset out of Range.\n", topic, partition)
 		// if the offset is out of range, simplistically decide whether to use OffsetNewest or OffsetOldest
 		// if the configuration specified offsetOldest, then switch to the oldest available offset, else
-		// switch to the newest available offset. 
-		if (cg.config.Offsets.Initial == sarama.OffsetOldest) {
+		// switch to the newest available offset.
+		if cg.config.Offsets.Initial == sarama.OffsetOldest {
 			nextOffset = sarama.OffsetOldest
 			cg.Logf("%s/%d :: Partition consumer offset reset to oldest available offset.\n", topic, partition)
 		} else {
