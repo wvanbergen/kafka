@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"gopkg.in/Shopify/sarama.v1"
+	"github.com/Shopify/sarama"
 )
 
 const (
