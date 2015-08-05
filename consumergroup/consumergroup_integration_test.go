@@ -132,8 +132,8 @@ func TestIntegrationSingleTopicParallelConsumers(t *testing.T) {
 
 	for eventCount1+eventCount2 < 200 {
 		select {
-		case <-time.After(10 * time.Second):
-			t.Fatal("Reader timeout")
+		case <-time.After(15 * time.Second):
+			t.Fatalf("Consumer timeout; read %d instead of %d messages", eventCount1+eventCount2, 200)
 
 		case event1, ok1 := <-events1:
 			handleEvent(event1, ok1)
