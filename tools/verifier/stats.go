@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gopkg.in/Shopify/sarama.v1"
+	"github.com/Shopify/sarama"
 )
 
 type MessageMetadata struct {

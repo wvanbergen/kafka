@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/wvanbergen/kazoo-go"
-	"gopkg.in/Shopify/sarama.v1"
+	"github.com/Shopify/sarama"
 )
 
 var (
