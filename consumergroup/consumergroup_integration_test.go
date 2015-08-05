@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	TopicWithSinglePartition    = "consumergroup.single"
-	TopicWithMultiplePartitions = "consumergroup.multi"
+	TopicWithSinglePartition    = "test.1"
+	TopicWithMultiplePartitions = "test.4"
 )
 
 var (
