@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wvanbergen/kafka/consumergroup"
 	"github.com/Shopify/sarama"
+	"github.com/wvanbergen/kafka/consumergroup"
+	"github.com/wvanbergen/kazoo-go"
 )
 
 const (
@@ -18,35 +19,34 @@ const (
 )
 
 var (
-	consumerGroup string
-	kafkaTopics   []string
-	zookeeper     []string
+	consumerGroup  = flag.String("group", DefaultConsumerGroup, "The name of the consumer group, used for coordination and load balancing")
+	kafkaTopicsCSV = flag.String("topics", DefaultKafkaTopics, "The comma-separated list of topics to consume")
+	zookeeper      = flag.String("zookeeper", "", "A comma-separated Zookeeper connection string (e.g. `zookeeper1.local:2181,zookeeper2.local:2181,zookeeper3.local:2181`)")
+
+	zookeeperNodes []string
 )
 
 func init() {
-	consumerGroup = *flag.String("group", DefaultConsumerGroup, "The name of the consumer group, used for coordination and load balancing")
-	kafkaTopicsCSV := flag.String("topics", DefaultKafkaTopics, "The comma-separated list of topics to consume")
-	zookeeperCSV := flag.String("zookeeper", "", "A comma-separated Zookeeper connection string (e.g. `zookeeper1.local:2181,zookeeper2.local:2181,zookeeper3.local:2181`)")
-
-	flag.Parse()
-
-	if *zookeeperCSV == "" {
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-
-	zookeeper = strings.Split(*zookeeperCSV, ",")
-	kafkaTopics = strings.Split(*kafkaTopicsCSV, ",")
-
 	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags)
 }
 
 func main() {
+	flag.Parse()
+
+	if *zookeeper == "" {
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
 	config := consumergroup.NewConfig()
 	config.Offsets.Initial = sarama.OffsetNewest
 	config.Offsets.ProcessingTimeout = 10 * time.Second
 
-	consumer, consumerErr := consumergroup.JoinConsumerGroup(consumerGroup, kafkaTopics, zookeeper, config)
+	zookeeperNodes, config.Zookeeper.Chroot = kazoo.ParseConnectionString(*zookeeper)
+
+	kafkaTopics := strings.Split(*kafkaTopicsCSV, ",")
+
+	consumer, consumerErr := consumergroup.JoinConsumerGroup(*consumerGroup, kafkaTopics, zookeeperNodes, config)
 	if consumerErr != nil {
 		log.Fatalln(consumerErr)
 	}
