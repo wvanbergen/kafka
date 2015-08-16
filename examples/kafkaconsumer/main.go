@@ -24,7 +24,7 @@ var (
 )
 
 func init() {
-	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags)
+	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags|log.Lshortfile)
 }
 
 func main() {
