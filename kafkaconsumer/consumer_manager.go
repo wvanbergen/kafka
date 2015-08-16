@@ -2,8 +2,10 @@ package kafkaconsumer
 
 import (
 	"sync"
+	"time"
 
 	"github.com/Shopify/sarama"
+	"github.com/samuel/go-zookeeper/zk"
 	"github.com/wvanbergen/kazoo-go"
 	"gopkg.in/tomb.v1"
 )
@@ -53,13 +55,13 @@ func (cm *consumerManager) run() {
 	defer cm.shutdown()
 
 	for {
-		partitions, subscriptionChanged, err := cm.subscription.WatchPartitions(cm.kz)
+		partitions, partitionsChanged, err := cm.WatchSubscription()
 		if err != nil {
 			cm.t.Kill(err)
 			return
 		}
 
-		instances, instancesChanged, err := cm.group.WatchInstances()
+		instances, instancesChanged, err := cm.watchConsumerInstances()
 		if err != nil {
 			cm.t.Kill(err)
 			return
@@ -84,12 +86,64 @@ func (cm *consumerManager) run() {
 			sarama.Logger.Printf("Consumer was interrupted, shutting down...")
 			return
 
-		case <-subscriptionChanged:
+		case <-partitionsChanged:
 			sarama.Logger.Printf("Woke up because the subscription reported a change in partitions.")
 
 		case <-instancesChanged:
 			sarama.Logger.Printf("Woke up because the list of running instances changed.")
 		}
+	}
+}
+
+func (cm *consumerManager) WatchSubscription() (kazoo.PartitionList, <-chan zk.Event, error) {
+	var (
+		partitions        kazoo.PartitionList
+		partitionsChanged <-chan zk.Event
+		err               error
+	)
+
+	for {
+		select {
+		case <-cm.t.Dying():
+			return nil, nil, tomb.ErrDying
+		default:
+		}
+
+		partitions, partitionsChanged, err = cm.subscription.WatchPartitions(cm.kz)
+		if err != nil {
+			sarama.Logger.Println("Failed to watch subscription:", err)
+			sarama.Logger.Println("Trying again in 1 second...")
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		return partitions, partitionsChanged, nil
+	}
+}
+
+func (cm *consumerManager) watchConsumerInstances() (kazoo.ConsumergroupInstanceList, <-chan zk.Event, error) {
+	var (
+		instances        kazoo.ConsumergroupInstanceList
+		instancesChanged <-chan zk.Event
+		err              error
+	)
+
+	for {
+		select {
+		case <-cm.t.Dying():
+			return nil, nil, tomb.ErrDying
+		default:
+		}
+
+		instances, instancesChanged, err = cm.group.WatchInstances()
+		if err != nil {
+			sarama.Logger.Println("Failed to watch consumer group instances:", err)
+			sarama.Logger.Println("Trying again in 1 second...")
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		return instances, instancesChanged, err
 	}
 }
 
