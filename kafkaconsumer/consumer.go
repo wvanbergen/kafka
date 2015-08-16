@@ -83,8 +83,12 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 	}
 
 	// Register itself with zookeeper
-	// TODO: proper registration of subscription
-	if err := cm.instance.Register([]string{""}); err != nil {
+	data, err := subscription.JSON()
+	if err != nil {
+		cm.shutdown()
+		return nil, err
+	}
+	if err := cm.instance.RegisterWithSubscription(data); err != nil {
 		cm.shutdown()
 		return nil, err
 	} else {
