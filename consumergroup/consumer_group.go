@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wvanbergen/kazoo-go"
 	"github.com/Shopify/sarama"
+	"github.com/wvanbergen/kazoo-go"
 )
 
 var (
@@ -346,7 +346,7 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 		return
 	}
 
-	if nextOffset > 0 {
+	if nextOffset >= 0 {
 		cg.Logf("%s/%d :: Partition consumer starting at offset %d.\n", topic, partition, nextOffset)
 	} else {
 		nextOffset = cg.config.Offsets.Initial
@@ -358,12 +358,12 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 	}
 
 	consumer, err := cg.consumer.ConsumePartition(topic, partition, nextOffset)
-	if (err == sarama.ErrOffsetOutOfRange) {
+	if err == sarama.ErrOffsetOutOfRange {
 		cg.Logf("%s/%d :: Partition consumer offset out of Range.\n", topic, partition)
 		// if the offset is out of range, simplistically decide whether to use OffsetNewest or OffsetOldest
 		// if the configuration specified offsetOldest, then switch to the oldest available offset, else
-		// switch to the newest available offset. 
-		if (cg.config.Offsets.Initial == sarama.OffsetOldest) {
+		// switch to the newest available offset.
+		if cg.config.Offsets.Initial == sarama.OffsetOldest {
 			nextOffset = sarama.OffsetOldest
 			cg.Logf("%s/%d :: Partition consumer offset reset to oldest available offset.\n", topic, partition)
 		} else {
