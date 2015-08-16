@@ -32,6 +32,10 @@ func init() {
 		kafkaPeers = strings.Split(kafkaPeersEnv, ",")
 	}
 
+	if os.Getenv("DEBUG") != "" {
+		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+	}
+
 	fmt.Printf("Using Zookeeper cluster at %v\n", zookeeperPeers)
 	fmt.Printf("Using Kafka cluster at %v\n", kafkaPeers)
 }
@@ -212,6 +216,11 @@ func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMa
 
 				processed += 1
 				offsets[message.Topic][message.Partition] = message.Offset
+
+				if os.Getenv("DEBUG") != "" {
+					log.Printf("Consumed %d from %s/%d\n", message.Offset, message.Topic, message.Partition)
+				}
+
 				cg.CommitUpto(message)
 			}
 
@@ -237,10 +246,13 @@ func produceEvents(t *testing.T, consumerGroup string, topic string, amount int6
 
 	for i := int64(1); i <= amount; i++ {
 		msg := &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(fmt.Sprintf("testing %d", i))}
-		_, _, err = producer.SendMessage(msg)
-
+		partition, offset, err := producer.SendMessage(msg)
 		if err != nil {
 			return err
+		}
+
+		if os.Getenv("DEBUG") != "" {
+			log.Printf("Produced message %d to %s/%d.\n", offset, msg.Topic, partition)
 		}
 	}
 
