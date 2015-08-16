@@ -2,6 +2,7 @@ package kafkaconsumer
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,141 @@ import (
 	"gopkg.in/tomb.v1"
 )
 
+// Consumer represents a consumer instance and is the main interface to work with as a consumer
+// of this library.
+type Consumer interface {
+	// Interrups will initiate the shutdown procedure of the consumer, and return immediately.
+	// When you are done using the consumer, you must either call Close or Interrupt to prevent leaking memory.
+	Interrupt()
+
+	// Closes will start the shutdown procedure for the consumer and wait for it to complete.
+	// When you are done using the consumer, you must either call Close or Interrupt to prevent leaking memory.
+	Close() error
+
+	// Messages returns a channel that you can read to obtain messages from Kafka to process.
+	// Every message that you receive from this channel should be sent to Commit after it has been processed.
+	Messages() <-chan *sarama.ConsumerMessage
+
+	// Error returns a channel that you can read to obtain errors that occur.
+	Errors() <-chan error
+
+	// Commit marks a message as processed, indicating that the message offset can be committed
+	// for the message's partition by the offset manager. Note that the offset manager may decide
+	// not to commit every offset immediately for effeciency reasons. Calling Close or Interrupt
+	// will make sure that the last offset provided to this function will be flushed to storage.
+	// You have to provide the messages in the same order as you received them from the Messages
+	// channel.
+	Commit(*sarama.ConsumerMessage)
+}
+
+// Join joins a Kafka consumer group, and returns a Consumer instance.
+// - `group` is the name of the group this consumer instance will join . All instances that form
+//   a consumer group should use the same name. A group name must be unique per Kafka cluster.
+// - `subscription` is an object that describes what partitions the group wants to consume.
+//   A single instance may end up consuming between zero of them, or all of them, or any number
+//   in between.
+// - `zookeeper` is the zookeeper connection string, e.g. "zk1:2181,zk2:2181,zk3:2181/chroot"
+// - `config` specifies the configuration. If it is nil, a default configuration is used.
+func Join(name string, subscription Subscription, zookeeper string, config *Config) (Consumer, error) {
+	if name == "" {
+		return nil, sarama.ConfigurationError("a group name cannot be empty")
+	}
+
+	if config == nil {
+		config = NewConfig()
+	}
+
+	var zkNodes []string
+	zkNodes, config.Zookeeper.Chroot = kazoo.ParseConnectionString(zookeeper)
+
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+
+	cm := &consumerManager{
+		config:       config,
+		subscription: subscription,
+
+		partitionManagers: make(map[string]*partitionManager),
+		messages:          make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
+		errors:            make(chan error, config.ChannelBufferSize),
+	}
+
+	if kz, err := kazoo.NewKazoo(zkNodes, config.Zookeeper); err != nil {
+		return nil, err
+	} else {
+		cm.kz = kz
+	}
+
+	cm.group = cm.kz.Consumergroup(name)
+	cm.instance = cm.group.NewInstance()
+
+	// Register the consumer group if it does not exist yet
+	if exists, err := cm.group.Exists(); err != nil {
+		cm.shutdown()
+		return nil, err
+
+	} else if !exists {
+		if err := cm.group.Create(); err != nil {
+			cm.shutdown()
+			return nil, err
+		}
+	}
+
+	// Register itself with zookeeper
+	data, err := subscription.JSON()
+	if err != nil {
+		cm.shutdown()
+		return nil, err
+	}
+	if err := cm.instance.RegisterWithSubscription(data); err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		sarama.Logger.Printf("Consumer instance registered (%s).", cm.instance.ID)
+	}
+
+	// Discover the Kafka brokers
+	brokers, err := cm.kz.BrokerList()
+	if err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		sarama.Logger.Printf("Discovered Kafka cluster at %s", strings.Join(brokers, ","))
+	}
+
+	// Initialize sarama client
+	if client, err := sarama.NewClient(brokers, config.Config); err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		cm.client = client
+	}
+
+	// Initialize sarama offset manager
+	if offsetManager, err := sarama.NewOffsetManagerFromClient(name, cm.client); err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		cm.offsetManager = offsetManager
+	}
+
+	// Initialize sarama consumer
+	if consumer, err := sarama.NewConsumerFromClient(cm.client); err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		cm.consumer = consumer
+	}
+
+	// Start the manager goroutine
+	go cm.run()
+
+	return cm, nil
+}
+
+// consumerManager implements the Consumer interface, and manages the goroutine that
+// is responsible for spawning and terminating partitionManagers.
 type consumerManager struct {
 	config       *Config
 	subscription Subscription
@@ -31,12 +167,10 @@ type consumerManager struct {
 	errors   chan error
 }
 
-// Returns a channel that you can read to obtain events from Kafka to process.
 func (cm *consumerManager) Messages() <-chan *sarama.ConsumerMessage {
 	return cm.messages
 }
 
-// Returns a channel that you can read to obtain events from Kafka to process.
 func (cm *consumerManager) Errors() <-chan error {
 	return cm.errors
 }
@@ -50,6 +184,8 @@ func (cm *consumerManager) Close() error {
 	return cm.t.Wait()
 }
 
+// Commit will dispatch a message to the right partitionManager's commit
+// function, so it can be marked as processed.
 func (cm *consumerManager) Commit(msg *sarama.ConsumerMessage) {
 	cm.m.RLock()
 	defer cm.m.RUnlock()
@@ -112,6 +248,10 @@ func (cm *consumerManager) run() {
 	}
 }
 
+// watchConsumerInstances retrieves the list of currently running consumer instances from Zookeeper,
+// and sets a watch to be notified of changes to this list. It will retry for any error that may
+// occur. If the consumer manager is interrupted, the error return value will be tomb.ErrDying. Any
+// other error is non-recoverable.
 func (cm *consumerManager) watchSubscription() (kazoo.PartitionList, <-chan zk.Event, error) {
 	var (
 		partitions        kazoo.PartitionList
@@ -128,8 +268,7 @@ func (cm *consumerManager) watchSubscription() (kazoo.PartitionList, <-chan zk.E
 
 		partitions, partitionsChanged, err = cm.subscription.WatchPartitions(cm.kz)
 		if err != nil {
-			sarama.Logger.Println("Failed to watch subscription:", err)
-			sarama.Logger.Println("Trying again in 1 second...")
+			sarama.Logger.Printf("Failed to watch subscription: %s. Trying again in 1 second...", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -138,6 +277,10 @@ func (cm *consumerManager) watchSubscription() (kazoo.PartitionList, <-chan zk.E
 	}
 }
 
+// watchConsumerInstances retrieves the list of currently running consumer instances from Zookeeper,
+// and sets a watch to be notified of changes to this list. It will retry for any error that may
+// occur. If the consumer manager is interrupted, the error return value will be tomb.ErrDying. Any
+// other error is non-recoverable.
 func (cm *consumerManager) watchConsumerInstances() (kazoo.ConsumergroupInstanceList, <-chan zk.Event, error) {
 	var (
 		instances        kazoo.ConsumergroupInstanceList
@@ -154,8 +297,7 @@ func (cm *consumerManager) watchConsumerInstances() (kazoo.ConsumergroupInstance
 
 		instances, instancesChanged, err = cm.group.WatchInstances()
 		if err != nil {
-			sarama.Logger.Println("Failed to watch consumer group instances:", err)
-			sarama.Logger.Println("Trying again in 1 second...")
+			sarama.Logger.Printf("Failed to watch onsumer group instances: %s. Trying again in 1 second...", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -164,7 +306,8 @@ func (cm *consumerManager) watchConsumerInstances() (kazoo.ConsumergroupInstance
 	}
 }
 
-// startPartitionManager starts a new partition manager in a a goroutine.
+// startPartitionManager starts a new partition manager in a a goroutine, and adds
+// it to the partitionManagers map.
 func (cm *consumerManager) startPartitionManager(partition *kazoo.Partition) {
 	pm := &partitionManager{
 		parent:             cm,
@@ -180,6 +323,8 @@ func (cm *consumerManager) startPartitionManager(partition *kazoo.Partition) {
 	go pm.run()
 }
 
+// startPartitionManager stops a running partition manager, and rmoves it
+// from the partitionManagers map.
 func (cm *consumerManager) stopPartitionManager(pm *partitionManager) {
 	if err := pm.close(); err != nil {
 		sarama.Logger.Printf("Failed to cleanly shut down consumer for %s: %s", pm.partition.Key(), err)

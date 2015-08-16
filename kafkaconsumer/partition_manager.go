@@ -10,6 +10,8 @@ import (
 	"gopkg.in/tomb.v1"
 )
 
+// partitionManager manages the consumption of a single partition, and committing
+// the processed messages to offset storage.
 type partitionManager struct {
 	parent    *consumerManager
 	t         tomb.Tomb
