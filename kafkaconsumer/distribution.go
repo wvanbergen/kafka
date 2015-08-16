@@ -73,7 +73,7 @@ func (pls partitionLeaderList) Len() int {
 }
 
 func (pls partitionLeaderList) Less(i, j int) bool {
-	return pls[i].leader < pls[j].leader || (pls[i].leader == pls[j].leader && pls[i].id < pls[j].id)
+	return pls[i].leader < pls[j].leader || (pls[i].leader == pls[j].leader && pls[i].partition.Key() < pls[j].partition.Key())
 }
 
 func (s partitionLeaderList) Swap(i, j int) {
