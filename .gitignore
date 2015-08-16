@@ -1,3 +1,5 @@
 /examples/consumergroup/consumergroup
+/examples/kafkaconsumer/kafkaconsumer
 /consumergroup/consumergroup.test
+/kafkaconsumer/kafkaconsumer.test
 /tools/transferoffsets/transferoffsets
