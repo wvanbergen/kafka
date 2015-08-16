@@ -51,55 +51,33 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 		return nil, err
 	}
 
-	kz, err := kazoo.NewKazoo(zkNodes, config.Zookeeper)
-	if err != nil {
-		return nil, err
-	}
-
-	// Discover the Kafka brokers
-	brokers, err := kz.BrokerList()
-	if err != nil {
-		return nil, err
-	} else {
-		sarama.Logger.Printf("Discovered Kafka cluster at %s", strings.Join(brokers, ","))
-	}
-
-	// Initialize sarama consumer
-	consumer, err := sarama.NewConsumer(brokers, config.Config)
-	if err != nil {
-		kz.Close()
-		return nil, err
-	}
-
-	group := kz.Consumergroup(name)
-	instance := group.NewInstance()
-
 	cm := &consumerManager{
-		config: config,
-
-		kz:           kz,
-		group:        group,
-		instance:     instance,
+		config:       config,
 		subscription: subscription,
-		consumer:     consumer,
 
 		t:                 &tomb.Tomb{},
 		partitionManagers: make(map[string]*partitionManager),
-
-		messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
-		errors:   make(chan *sarama.ConsumerError, config.ChannelBufferSize),
+		messages:          make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
+		errors:            make(chan *sarama.ConsumerError, config.ChannelBufferSize),
 	}
+
+	if kz, err := kazoo.NewKazoo(zkNodes, config.Zookeeper); err != nil {
+		return nil, err
+	} else {
+		cm.kz = kz
+	}
+
+	cm.group = cm.kz.Consumergroup(name)
+	cm.instance = cm.group.NewInstance()
 
 	// Register the consumer group if it does not exist yet
 	if exists, err := cm.group.Exists(); err != nil {
-		_ = consumer.Close()
-		_ = kz.Close()
+		cm.shutdown()
 		return nil, err
 
 	} else if !exists {
 		if err := cm.group.Create(); err != nil {
-			_ = consumer.Close()
-			_ = kz.Close()
+			cm.shutdown()
 			return nil, err
 		}
 	}
@@ -107,13 +85,38 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 	// Register itself with zookeeper
 	// TODO: proper registration of subscription
 	if err := cm.instance.Register([]string{""}); err != nil {
-		_ = consumer.Close()
-		_ = kz.Close()
+		cm.shutdown()
 		return nil, err
 	} else {
 		sarama.Logger.Printf("Consumer instance registered (%s).", cm.instance.ID)
 	}
 
+	// Discover the Kafka brokers
+	brokers, err := cm.kz.BrokerList()
+	if err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		sarama.Logger.Printf("Discovered Kafka cluster at %s", strings.Join(brokers, ","))
+	}
+
+	// Initialize sarama Client
+	if client, err := sarama.NewClient(brokers, config.Config); err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		cm.client = client
+	}
+
+	// Initialize sarama consumer
+	if consumer, err := sarama.NewConsumerFromClient(cm.client); err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		cm.consumer = consumer
+	}
+
+	// Start the manager goroutine
 	go cm.run()
 
 	return cm, nil

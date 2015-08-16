@@ -17,7 +17,10 @@ type consumerManager struct {
 	kz       *kazoo.Kazoo
 	group    *kazoo.Consumergroup
 	instance *kazoo.ConsumergroupInstance
-	consumer sarama.Consumer
+
+	client        sarama.Client
+	consumer      sarama.Consumer
+	offsetManager sarama.OffsetManager
 
 	t                 *tomb.Tomb
 	partitionManagers map[string]*partitionManager
@@ -202,16 +205,28 @@ func (cm *consumerManager) shutdown() {
 
 	cm.managePartitionManagers(nil)
 
-	if err := cm.consumer.Close(); err != nil {
-		sarama.Logger.Print("Failed to close Kafka client:", err)
+	if cm.consumer != nil {
+		if err := cm.consumer.Close(); err != nil {
+			sarama.Logger.Print("Failed to close Kafka client:", err)
+		}
 	}
 
-	if err := cm.instance.Deregister(); err != nil {
-		sarama.Logger.Print("Failed to deregister consumer instance:", err)
+	if cm.client != nil {
+		if err := cm.client.Close(); err != nil {
+			sarama.Logger.Print("Failed to close Kafka offset manager:", err)
+		}
 	}
 
-	if err := cm.kz.Close(); err != nil {
-		sarama.Logger.Print("Failed to close Zookeeper connection:", err)
+	if cm.instance != nil {
+		if err := cm.instance.Deregister(); err != nil {
+			sarama.Logger.Print("Failed to deregister consumer instance:", err)
+		}
+	}
+
+	if cm.kz != nil {
+		if err := cm.kz.Close(); err != nil {
+			sarama.Logger.Print("Failed to close Zookeeper connection:", err)
+		}
 	}
 
 	close(cm.messages)
