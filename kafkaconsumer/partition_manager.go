@@ -2,6 +2,7 @@ package kafkaconsumer
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/Shopify/sarama"
@@ -11,8 +12,12 @@ import (
 
 type partitionManager struct {
 	parent    *consumerManager
-	t         *tomb.Tomb
+	t         tomb.Tomb
 	partition *kazoo.Partition
+
+	offsetManager      sarama.PartitionOffsetManager
+	lastConsumedOffset int64
+	processingDone     chan struct{}
 }
 
 // run implements the main partition manager loop.
@@ -29,11 +34,25 @@ func (pm *partitionManager) run() {
 	}
 	defer pm.releasePartition()
 
-	initialOffset, err := pm.fetchInitialOffset()
+	offsetManager, err := pm.parent.offsetManager.ManagePartition(pm.partition.Topic().Name, pm.partition.ID)
 	if err != nil {
+		// TODO: retry
 		pm.t.Kill(err)
 		return
+	} else {
+		pm.offsetManager = offsetManager
+		defer offsetManager.Close()
 	}
+
+	// We are ignoring metadata for now.
+	initialOffset, _ := offsetManager.Offset()
+	if initialOffset < 0 {
+		initialOffset = pm.parent.config.Offsets.Initial
+	} else {
+		// Fix the off by one error: we should start consuming once message after the last committed offset
+		initialOffset += 1
+	}
+	defer pm.waitForProcessing()
 
 	pc, err := pm.startPartitionConsumer(initialOffset)
 	if err != nil {
@@ -50,7 +69,16 @@ func (pm *partitionManager) run() {
 		case msg := <-pc.Messages():
 			select {
 			case pm.parent.messages <- msg:
-				// Track offset
+				atomic.StoreInt64(&pm.lastConsumedOffset, msg.Offset)
+
+			case <-pm.t.Dying():
+				return
+			}
+
+		case err := <-offsetManager.Errors():
+			select {
+			case pm.parent.errors <- err:
+				// Noop?
 			case <-pm.t.Dying():
 				return
 			}
@@ -66,6 +94,27 @@ func (pm *partitionManager) run() {
 	}
 }
 
+func (pm *partitionManager) waitForProcessing() {
+	lastProcessedOffset, _ := pm.offsetManager.Offset()
+	lastConsumedOffset := atomic.LoadInt64(&pm.lastConsumedOffset)
+
+	if lastConsumedOffset >= 0 {
+		if lastConsumedOffset > lastProcessedOffset {
+			sarama.Logger.Printf("Waiting for offset %d to be processed before stopping %s...", lastConsumedOffset, pm.partition.Key())
+
+			select {
+			case <-pm.processingDone:
+				sarama.Logger.Printf("Offset %d has been processed for %s, continuing shutdown.", lastConsumedOffset, pm.partition.Key())
+			case <-time.After(pm.parent.config.MaxProcessingTime):
+
+				sarama.Logger.Printf("TIMEOUT: offset %d still has not been processed for %s. The last committed offset was %d.", lastConsumedOffset, pm.partition.Key(), lastProcessedOffset)
+			}
+		} else {
+			sarama.Logger.Printf("Offset %d has been processed for %s. Continuing shutdown...", lastConsumedOffset, pm.partition.Key())
+		}
+	}
+}
+
 // interrupt initiates the shutdown procedure for the partition manager, and returns immediately.
 func (pm *partitionManager) interrupt() {
 	pm.t.Kill(nil)
@@ -75,6 +124,14 @@ func (pm *partitionManager) interrupt() {
 func (pm *partitionManager) close() error {
 	pm.interrupt()
 	return pm.t.Wait()
+}
+
+func (pm *partitionManager) commit(offset int64) {
+	pm.offsetManager.SetOffset(offset, "")
+
+	if pm.t.Err() != tomb.ErrStillAlive && offset == atomic.LoadInt64(&pm.lastConsumedOffset) {
+		close(pm.processingDone)
+	}
 }
 
 // claimPartition claims a partition in Zookeeper for this instance.
@@ -120,36 +177,6 @@ func (pm *partitionManager) claimPartition() error {
 			sarama.Logger.Printf("Claimed ownership for %s", pm.partition.Key())
 			return nil
 		}
-	}
-}
-
-// fetchInitialOffset determines the initial offset to use for the partition consumer.
-// It will retry errors that occur. The returned error is nil if an offset was determined
-// successfully, or tomb.ErrDying if the partition manager was interrupted. Any other
-// error is non-recoverable.
-func (pm *partitionManager) fetchInitialOffset() (int64, error) {
-	for {
-		select {
-		case <-pm.t.Dying():
-			return -1, tomb.ErrDying
-		default:
-		}
-
-		initialOffset, err := pm.parent.group.FetchOffset(pm.partition.Topic().Name, pm.partition.ID)
-		if err != nil {
-			sarama.Logger.Printf("Failed to fetch offset for %s: %s\n", pm.partition.Key(), err)
-			sarama.Logger.Printf("Trying again in 1 second...")
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		// If the consumer never committed an offset for this partition before, a negative offset is returned.
-		// In that case, we either start at the newest or oldest offset, based on the configuration.
-		if initialOffset < 0 {
-			initialOffset = pm.parent.config.Offsets.Initial
-		}
-
-		return initialOffset, nil
 	}
 }
 

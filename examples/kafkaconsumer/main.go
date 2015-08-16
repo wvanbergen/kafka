@@ -37,7 +37,6 @@ func main() {
 
 	config := kafkaconsumer.NewConfig()
 	config.Offsets.Initial = sarama.OffsetNewest
-	config.Offsets.ProcessingTimeout = 10 * time.Second
 
 	subscription := kafkaconsumer.TopicSubscription(strings.Split(*kafkaTopicsCSV, ",")...)
 	consumer, err := kafkaconsumer.Join(*consumerGroup, subscription, *zookeeper, config)
@@ -77,7 +76,7 @@ func main() {
 		time.Sleep(10 * time.Millisecond)
 
 		offsets[message.Topic][message.Partition] = message.Offset
-		// consumer.CommitUpto(message)
+		consumer.Commit(message)
 	}
 
 	log.Printf("Processed %d events.", eventCount)

@@ -13,9 +13,10 @@ type Config struct {
 
 	Zookeeper *kazoo.Config
 
+	MaxProcessingTime time.Duration // Time to wait for all the offsets for a partition to be processed after stopping to consume from it. Defaults to 1 minute.
+
 	Offsets struct {
-		Initial           int64         // The initial offset method to use if the consumer has no previously stored offset. Must be either sarama.OffsetOldest (default) or sarama.OffsetNewest.
-		ProcessingTimeout time.Duration // Time to wait for all the offsets for a partition to be processed after stopping to consume from it. Defaults to 1 minute.
+		Initial int64 // The initial offset method to use if the consumer has no previously stored offset. Must be either sarama.OffsetOldest (default) or sarama.OffsetNewest.
 	}
 }
 
@@ -24,18 +25,18 @@ func NewConfig() *Config {
 	config.Config = sarama.NewConfig()
 	config.Zookeeper = kazoo.NewConfig()
 	config.Offsets.Initial = sarama.OffsetOldest
-	config.Offsets.ProcessingTimeout = 60 * time.Second
+	config.MaxProcessingTime = 60 * time.Second
 
 	return config
 }
 
 func (cgc *Config) Validate() error {
 	if cgc.Zookeeper.Timeout <= 0 {
-		return sarama.ConfigurationError("ZookeeperTimeout should have a duration > 0")
+		return sarama.ConfigurationError("Zookeeper.Timeout should have a duration > 0")
 	}
 
-	if cgc.Offsets.ProcessingTimeout <= 0 {
-		return sarama.ConfigurationError("ProcessingTimeout should have a duration > 0")
+	if cgc.MaxProcessingTime <= 0 {
+		return sarama.ConfigurationError("MaxProcessingTime should have a duration > 0")
 	}
 
 	if cgc.Offsets.Initial != sarama.OffsetOldest && cgc.Offsets.Initial != sarama.OffsetNewest {

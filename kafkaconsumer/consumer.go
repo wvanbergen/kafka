@@ -5,7 +5,6 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/wvanbergen/kazoo-go"
-	"gopkg.in/tomb.v1"
 )
 
 // Consumer represents a consumer instance and is the main interface to work with as a consumer
@@ -21,10 +20,12 @@ type Consumer interface {
 	Messages() <-chan *sarama.ConsumerMessage
 
 	// Returns a channel that you can read to obtain errors that occur.
-	Errors() <-chan *sarama.ConsumerError
+	Errors() <-chan error
 
 	// Returns a channel that you should feed messages to after you have processed them.
 	// Processed() chan<- *sarama.ConsumerMessage
+
+	Commit(*sarama.ConsumerMessage)
 }
 
 // Join joins a Kafka consumer group, and returns a Consumer instance.
@@ -55,10 +56,9 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 		config:       config,
 		subscription: subscription,
 
-		t:                 &tomb.Tomb{},
 		partitionManagers: make(map[string]*partitionManager),
 		messages:          make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
-		errors:            make(chan *sarama.ConsumerError, config.ChannelBufferSize),
+		errors:            make(chan error, config.ChannelBufferSize),
 	}
 
 	if kz, err := kazoo.NewKazoo(zkNodes, config.Zookeeper); err != nil {
@@ -100,12 +100,20 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 		sarama.Logger.Printf("Discovered Kafka cluster at %s", strings.Join(brokers, ","))
 	}
 
-	// Initialize sarama Client
+	// Initialize sarama client
 	if client, err := sarama.NewClient(brokers, config.Config); err != nil {
 		cm.shutdown()
 		return nil, err
 	} else {
 		cm.client = client
+	}
+
+	// Initialize sarama offset manager
+	if offsetManager, err := sarama.NewOffsetManagerFromClient(name, cm.client); err != nil {
+		cm.shutdown()
+		return nil, err
+	} else {
+		cm.offsetManager = offsetManager
 	}
 
 	// Initialize sarama consumer

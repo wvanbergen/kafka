@@ -1,6 +1,7 @@
 package kafkaconsumer
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -22,11 +23,12 @@ type consumerManager struct {
 	consumer      sarama.Consumer
 	offsetManager sarama.OffsetManager
 
-	t                 *tomb.Tomb
+	t                 tomb.Tomb
+	m                 sync.RWMutex
 	partitionManagers map[string]*partitionManager
 
 	messages chan *sarama.ConsumerMessage
-	errors   chan *sarama.ConsumerError
+	errors   chan error
 }
 
 // Returns a channel that you can read to obtain events from Kafka to process.
@@ -35,7 +37,7 @@ func (cm *consumerManager) Messages() <-chan *sarama.ConsumerMessage {
 }
 
 // Returns a channel that you can read to obtain events from Kafka to process.
-func (cm *consumerManager) Errors() <-chan *sarama.ConsumerError {
+func (cm *consumerManager) Errors() <-chan error {
 	return cm.errors
 }
 
@@ -48,6 +50,19 @@ func (cm *consumerManager) Close() error {
 	return cm.t.Wait()
 }
 
+func (cm *consumerManager) Commit(msg *sarama.ConsumerMessage) {
+	cm.m.RLock()
+	defer cm.m.RUnlock()
+
+	partitionKey := fmt.Sprintf("%s/%d", msg.Topic, msg.Partition)
+	partitionManager := cm.partitionManagers[partitionKey]
+	if partitionManager == nil {
+		sarama.Logger.Printf("ERROR: committed message %d for %s, but this partition is not managed by this consumer!", msg.Offset, partitionKey)
+	} else {
+		partitionManager.commit(msg.Offset)
+	}
+}
+
 // run implements the main loop of the consumer manager.
 // 1. Get partitions that the group subscribes to
 // 2. Get the currently running instances
@@ -58,7 +73,7 @@ func (cm *consumerManager) run() {
 	defer cm.shutdown()
 
 	for {
-		partitions, partitionsChanged, err := cm.WatchSubscription()
+		partitions, partitionsChanged, err := cm.watchSubscription()
 		if err != nil {
 			cm.t.Kill(err)
 			return
@@ -81,7 +96,6 @@ func (cm *consumerManager) run() {
 			assignedPartitions[partition.Key()] = partition
 		}
 
-		sarama.Logger.Printf("This instance is assigned to consume %d partitions, and is currently consuming %d partitions.", len(assignedPartitions), len(cm.partitionManagers))
 		cm.managePartitionManagers(assignedPartitions)
 
 		select {
@@ -98,7 +112,7 @@ func (cm *consumerManager) run() {
 	}
 }
 
-func (cm *consumerManager) WatchSubscription() (kazoo.PartitionList, <-chan zk.Event, error) {
+func (cm *consumerManager) watchSubscription() (kazoo.PartitionList, <-chan zk.Event, error) {
 	var (
 		partitions        kazoo.PartitionList
 		partitionsChanged <-chan zk.Event
@@ -151,16 +165,29 @@ func (cm *consumerManager) watchConsumerInstances() (kazoo.ConsumergroupInstance
 }
 
 // startPartitionManager starts a new partition manager in a a goroutine.
-func (cm *consumerManager) startPartitionManager(partition *kazoo.Partition) *partitionManager {
-	pc := &partitionManager{
-		parent:    cm,
-		partition: partition,
-		t:         &tomb.Tomb{},
+func (cm *consumerManager) startPartitionManager(partition *kazoo.Partition) {
+	pm := &partitionManager{
+		parent:             cm,
+		partition:          partition,
+		lastConsumedOffset: -1,
+		processingDone:     make(chan struct{}),
 	}
 
-	go pc.run()
+	cm.m.Lock()
+	cm.partitionManagers[pm.partition.Key()] = pm
+	cm.m.Unlock()
 
-	return pc
+	go pm.run()
+}
+
+func (cm *consumerManager) stopPartitionManager(pm *partitionManager) {
+	if err := pm.close(); err != nil {
+		sarama.Logger.Printf("Failed to cleanly shut down consumer for %s: %s", pm.partition.Key(), err)
+	}
+
+	cm.m.Lock()
+	delete(cm.partitionManagers, pm.partition.Key())
+	cm.m.Unlock()
 }
 
 // managePartitionManagers will compare the currently running partition managers to the list
@@ -169,26 +196,32 @@ func (cm *consumerManager) startPartitionManager(partition *kazoo.Partition) *pa
 func (cm *consumerManager) managePartitionManagers(assignedPartitions map[string]*kazoo.Partition) {
 	var wg sync.WaitGroup
 
+	cm.m.RLock()
+	sarama.Logger.Printf("This instance is assigned to consume %d partitions, and is currently consuming %d partitions.", len(assignedPartitions), len(cm.partitionManagers))
+
 	// Stop consumers for partitions that we were not already consuming
 	for partitionKey, pm := range cm.partitionManagers {
 		if _, ok := assignedPartitions[partitionKey]; !ok {
 			wg.Add(1)
 			go func(pm *partitionManager) {
 				defer wg.Done()
-				if err := pm.close(); err != nil {
-					sarama.Logger.Printf("Failed to cleanly shut down consumer for %s: %s", pm.partition.Key(), err)
-				}
+				cm.stopPartitionManager(pm)
 			}(pm)
-			delete(cm.partitionManagers, partitionKey)
 		}
 	}
 
 	// Start consumers for partitions that we were not already consuming
 	for partitionKey, partition := range assignedPartitions {
 		if _, ok := cm.partitionManagers[partitionKey]; !ok {
-			cm.partitionManagers[partitionKey] = cm.startPartitionManager(partition)
+			wg.Add(1)
+			go func(partition *kazoo.Partition) {
+				defer wg.Done()
+				cm.startPartitionManager(partition)
+			}(partition)
 		}
 	}
+
+	cm.m.RUnlock()
 
 	// Wait until all the interrupted partionManagers have shut down completely.
 	wg.Wait()
