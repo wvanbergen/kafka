@@ -2,6 +2,8 @@ package kafkaconsumer
 
 import (
 	"encoding/json"
+	"regexp"
+	"sync"
 	"time"
 
 	"github.com/Shopify/sarama"
@@ -65,7 +67,7 @@ func StaticSubscription(subscription map[string]int) Subscription {
 func (ss *staticSubscription) WatchPartitions(kz *kazoo.Kazoo) (kazoo.PartitionList, <-chan zk.Event, error) {
 	var (
 		allPartitions = make([]*kazoo.Partition, 0)
-		allChanges    = make(chan zk.Event, 1)
+		ca            = newChangeAggregator()
 	)
 
 	for topicName, _ := range ss.Subscription {
@@ -78,24 +80,147 @@ func (ss *staticSubscription) WatchPartitions(kz *kazoo.Kazoo) (kazoo.PartitionL
 			continue
 		}
 
-		partitions, changes, err := topic.WatchPartitions()
+		partitions, partitionsChanged, err := topic.WatchPartitions()
 		if err != nil {
 			return nil, nil, err
 		}
 
-		go func(changes <-chan zk.Event) {
-			event := <-changes
-			allChanges <- event
-		}(changes)
+		ca.handleChange(partitionsChanged)
 
 		for _, partition := range partitions {
 			allPartitions = append(allPartitions, partition)
 		}
 	}
 
-	return allPartitions, allChanges, nil
+	return allPartitions, ca.channel(), nil
 }
 
+// JSON returns the json representation of the static subscription
 func (ss *staticSubscription) JSON() ([]byte, error) {
 	return json.Marshal(ss)
+}
+
+type regexpSubscription struct {
+	Pattern      SubscriptionPattern `json:"pattern"`
+	Subscription map[string]int      `json:"subscription"`
+	Timestamp    int64               `json:"timestamp,string"`
+	Version      int                 `json:"version"`
+
+	regexp *regexp.Regexp
+}
+
+// WhitelistSubscription creates a subscription on topics that match a given regular expression.
+// It will automatically subscribe to new topics that match the pattern when they are created.
+func WhitelistSubscription(pattern *regexp.Regexp) Subscription {
+	subscription := make(map[string]int)
+	subscription[pattern.String()] = 1
+
+	return &regexpSubscription{
+		Version:      1,
+		Timestamp:    time.Now().UnixNano() / int64(time.Millisecond),
+		Pattern:      SubscriptionPatternWhiteList,
+		Subscription: subscription,
+
+		regexp: pattern,
+	}
+}
+
+// BlacklistSubscription creates a subscription on topics that do not match a given regular expression.
+// It will automatically subscribe to new topics that don't match the pattern when they are created.
+func BlacklistSubscription(pattern *regexp.Regexp) Subscription {
+	subscription := make(map[string]int)
+	subscription[pattern.String()] = 1
+
+	return &regexpSubscription{
+		Version:      1,
+		Timestamp:    time.Now().UnixNano() / int64(time.Millisecond),
+		Pattern:      SubscriptionPatternBlackList,
+		Subscription: subscription,
+
+		regexp: pattern,
+	}
+}
+
+func (rs *regexpSubscription) topicMatchesPattern(topicName string) bool {
+	switch rs.Pattern {
+	case SubscriptionPatternWhiteList:
+		return rs.regexp.MatchString(topicName)
+	case SubscriptionPatternBlackList:
+		return !rs.regexp.MatchString(topicName)
+	default:
+		panic("Unexpected pattern for regexpSubscription")
+	}
+}
+
+func (rs *regexpSubscription) WatchPartitions(kz *kazoo.Kazoo) (kazoo.PartitionList, <-chan zk.Event, error) {
+	var (
+		allPartitions = make([]*kazoo.Partition, 0)
+		ca            = newChangeAggregator()
+	)
+
+	topics, topicsChanged, err := kz.WatchTopics()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ca.handleChange(topicsChanged)
+
+	for _, topic := range topics {
+		if rs.topicMatchesPattern(topic.Name) {
+			partitions, partitionsChanged, err := topic.WatchPartitions()
+			if err != nil {
+				return nil, nil, err
+			}
+
+			ca.handleChange(partitionsChanged)
+
+			for _, partition := range partitions {
+				allPartitions = append(allPartitions, partition)
+			}
+		}
+	}
+
+	return allPartitions, ca.channel(), nil
+}
+
+// JSON returns the json representation of the static subscription
+func (rs *regexpSubscription) JSON() ([]byte, error) {
+	return json.Marshal(rs)
+}
+
+func newChangeAggregator() *changeAggregator {
+	return &changeAggregator{
+		dying: make(chan struct{}, 0),
+		c:     make(chan zk.Event, 1),
+	}
+}
+
+// changeAggregator will emit only the first change event to the
+// output channel. All other goroutines waiting for zookeeper watches
+// will be stopped once this happens.
+type changeAggregator struct {
+	dying chan struct{}
+	c     chan zk.Event
+	once  sync.Once
+}
+
+func (ca *changeAggregator) handleChange(change <-chan zk.Event) {
+	go ca.waitForChange(change)
+}
+
+func (ca *changeAggregator) waitForChange(change <-chan zk.Event) {
+	select {
+	case <-ca.dying:
+		return
+	case event := <-change:
+		ca.once.Do(func() {
+			close(ca.dying)
+			ca.c <- event
+			close(ca.c)
+		})
+	}
+}
+
+func (ca *changeAggregator) channel() <-chan zk.Event {
+	return ca.c
 }
