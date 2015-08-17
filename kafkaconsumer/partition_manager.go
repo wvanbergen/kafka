@@ -103,7 +103,7 @@ func (pm *partitionManager) startPartitionOffsetManager() (sarama.PartitionOffse
 	for {
 		offsetManager, err := pm.parent.offsetManager.ManagePartition(pm.partition.Topic().Name, pm.partition.ID)
 		if err != nil {
-			Logger.Printf("Failed to start partition offset manager for %s: %s. Trying again in 1 second...\n", pm.partition.Key(), err)
+			pm.logf("FAILED to start partition offset manager: %s. Trying again in 1 second...\n", err)
 
 			select {
 			case <-pm.t.Dying():
@@ -127,17 +127,16 @@ func (pm *partitionManager) waitForProcessing() {
 
 	if lastConsumedOffset >= 0 {
 		if lastConsumedOffset > lastProcessedOffset {
-			Logger.Printf("Waiting for offset %d to be processed before stopping %s...", lastConsumedOffset, pm.partition.Key())
+			pm.logf("Waiting for offset %d to be processed before shutting down...", lastConsumedOffset)
 
 			select {
 			case <-pm.processingDone:
-				Logger.Printf("Offset %d has been processed for %s, continuing shutdown.", lastConsumedOffset, pm.partition.Key())
+				pm.logf("Offset %d has been processed, continuing shutdown.", lastConsumedOffset)
 			case <-time.After(pm.parent.config.MaxProcessingTime):
-
-				Logger.Printf("TIMEOUT: offset %d still has not been processed for %s. The last processed offset was %d.", lastConsumedOffset, pm.partition.Key(), lastProcessedOffset)
+				pm.logf("TIMEOUT: offset %d still has not been processed. The last processed offset was %d.", lastConsumedOffset, lastProcessedOffset)
 			}
 		} else {
-			Logger.Printf("Offset %d has been processed for %s. Continuing shutdown...", lastConsumedOffset, pm.partition.Key())
+			pm.logf("Offset %d has been processed. Continuing shutdown...", lastConsumedOffset)
 		}
 	}
 }
@@ -170,12 +169,12 @@ func (pm *partitionManager) ack(offset int64) {
 // tomb.ErrDying if the partitionManager was interrupted. Any other errors
 // are not recoverable.
 func (pm *partitionManager) claimPartition() error {
-	Logger.Printf("Trying to claim partition %s...", pm.partition.Key())
+	pm.logf("Trying to claim partition...")
 
 	for {
 		owner, changed, err := pm.parent.group.WatchPartitionOwner(pm.partition.Topic().Name, pm.partition.ID)
 		if err != nil {
-			Logger.Printf("Failed to get partition owner for %s from Zookeeper: %s. Trying again in 1 second...", pm.partition.Key(), err)
+			pm.logf("Failed to get partition owner from Zookeeper: %s. Trying again in 1 second...", err)
 			select {
 			case <-time.After(1 * time.Second):
 				continue
@@ -189,7 +188,7 @@ func (pm *partitionManager) claimPartition() error {
 				return fmt.Errorf("The current instance is already the owner of %s. This should not happen.", pm.partition.Key())
 			}
 
-			Logger.Printf("Partition %s is currently claimed by instance %s. Waiting for it to be released...", pm.partition.Key(), owner.ID)
+			pm.logf("Partition is currently claimed by instance %s. Waiting for it to be released...", owner.ID)
 			select {
 			case <-changed:
 				continue
@@ -201,11 +200,11 @@ func (pm *partitionManager) claimPartition() error {
 
 			err := pm.parent.instance.ClaimPartition(pm.partition.Topic().Name, pm.partition.ID)
 			if err != nil {
-				Logger.Printf("Fail to claim ownership for %s: %s. Trying again...", pm.partition.Key(), err)
+				pm.logf("Fail to claim partition ownership: %s. Trying again...", err)
 				continue
 			}
 
-			Logger.Printf("Claimed ownership for %s", pm.partition.Key())
+			pm.logf("Claimed partition ownership")
 			return nil
 		}
 	}
@@ -227,11 +226,11 @@ func (pm *partitionManager) startPartitionConsumer(initialOffset int64) (sarama.
 		case nil:
 			switch initialOffset {
 			case sarama.OffsetNewest:
-				Logger.Printf("Started consumer for %s for new messages only.", pm.partition.Key())
+				pm.logf("Started consumer for new messages only.")
 			case sarama.OffsetOldest:
-				Logger.Printf("Started consumer for %s at the oldest available offset.", pm.partition.Key())
+				pm.logf("Started consumer at the oldest available offset.")
 			default:
-				Logger.Printf("Started consumer for %s at offset %d.", pm.partition.Key(), initialOffset)
+				pm.logf("Started consumer at offset %d.", initialOffset)
 			}
 
 			// We have a valid partition consumer so we can return
@@ -240,9 +239,9 @@ func (pm *partitionManager) startPartitionConsumer(initialOffset int64) (sarama.
 		case sarama.ErrOffsetOutOfRange:
 			// The offset we had on file is too old. Restart with initial offset
 			if pm.parent.config.Offsets.Initial == sarama.OffsetNewest {
-				Logger.Printf("Offset %d is no longer available for %s. Trying again with new messages only...", initialOffset, pm.partition.Key())
+				pm.logf("Offset %d is no longer available. Trying again with new messages only...", initialOffset)
 			} else if pm.parent.config.Offsets.Initial == sarama.OffsetOldest {
-				Logger.Printf("Offset %d is no longer available for %s. Trying again with he oldest available offset...", initialOffset, pm.partition.Key())
+				pm.logf("Offset %d is no longer available. Trying again with he oldest available offset...", initialOffset)
 			}
 			initialOffset = pm.parent.config.Offsets.Initial
 
@@ -250,9 +249,7 @@ func (pm *partitionManager) startPartitionConsumer(initialOffset int64) (sarama.
 
 		default:
 			// Assume the problem is temporary; just try again.
-			// FIXME: Do we want to treat all errors like this?
-			// FIXME: Should te sleep by configurable?
-			Logger.Printf("Failed to start consuming partition for %s: %s. Trying again in 1 second...\n", pm.partition.Key(), err)
+			pm.logf("Failed to start consuming partition: %s. Trying again in 1 second...\n", err)
 			select {
 			case <-pm.t.Dying():
 				return nil, tomb.ErrDying
@@ -267,15 +264,19 @@ func (pm *partitionManager) startPartitionConsumer(initialOffset int64) (sarama.
 // closePartitionConsumer closes the sarama consumer for the partition under management.
 func (pm *partitionManager) closePartitionConsumer(pc sarama.PartitionConsumer) {
 	if err := pc.Close(); err != nil {
-		Logger.Printf("Failed to close partition consumer for %s: %s\n", pm.partition.Key(), err)
+		pm.logf("Failed to close partition consumer: %s\n", err)
 	}
 }
 
 // releasePartition releases this instance's claim on this partition in Zookeeper.
 func (pm *partitionManager) releasePartition() {
 	if err := pm.parent.instance.ReleasePartition(pm.partition.Topic().Name, pm.partition.ID); err != nil {
-		Logger.Printf("FAILED to release partition %s: %s", pm.partition.Key(), err)
+		pm.logf("FAILED to release partition: %s", err)
 	} else {
-		Logger.Printf("Released partition %s.", pm.partition.Key())
+		pm.logf("Released partition.")
 	}
+}
+
+func (pm *partitionManager) logf(format string, arguments ...interface{}) {
+	Logger.Printf(fmt.Sprintf("[instance=%s partition=%s] %s", pm.parent.shortID(), pm.partition.Key(), format), arguments...)
 }
