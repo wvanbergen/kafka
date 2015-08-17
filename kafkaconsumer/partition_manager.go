@@ -36,9 +36,8 @@ func (pm *partitionManager) run() {
 	}
 	defer pm.releasePartition()
 
-	offsetManager, err := pm.parent.offsetManager.ManagePartition(pm.partition.Topic().Name, pm.partition.ID)
+	offsetManager, err := pm.startPartitionOffsetManager()
 	if err != nil {
-		// TODO: retry
 		pm.t.Kill(err)
 		return
 	} else {
@@ -96,6 +95,32 @@ func (pm *partitionManager) run() {
 	}
 }
 
+// startPartitionOffsetManager starts a PartitionOffsetManager for the partition, and will
+// retry any errors. The only error value that can be returned is tomb.ErrDying, which is
+// returned when the partition manager is interrupted. Any other error should be considered
+// non-recoverable.
+func (pm *partitionManager) startPartitionOffsetManager() (sarama.PartitionOffsetManager, error) {
+	for {
+		offsetManager, err := pm.parent.offsetManager.ManagePartition(pm.partition.Topic().Name, pm.partition.ID)
+		if err != nil {
+			sarama.Logger.Printf("Failed to start partition offset manager for %s: %s. Trying again in 1 second...\n", pm.partition.Key(), err)
+
+			select {
+			case <-pm.t.Dying():
+				return nil, tomb.ErrDying
+			case <-time.After(1 * time.Second):
+				continue
+			}
+		}
+
+		return offsetManager, nil
+	}
+}
+
+// waitForProcessing waits for all the messages that were consumed for this partition to be processed.
+// The processing can take at most MaxProcessingTime time. After that, those messages are consisered
+// lost and will not be committed. Note that this may cause messages to be processed twice if another
+// partition consumer resumes consuming from this partition later.
 func (pm *partitionManager) waitForProcessing() {
 	lastProcessedOffset, _ := pm.offsetManager.Offset()
 	lastConsumedOffset := atomic.LoadInt64(&pm.lastConsumedOffset)
@@ -150,9 +175,13 @@ func (pm *partitionManager) claimPartition() error {
 	for {
 		owner, changed, err := pm.parent.group.WatchPartitionOwner(pm.partition.Topic().Name, pm.partition.ID)
 		if err != nil {
-			sarama.Logger.Println("Failed to get partition owner from Zookeeper:", err)
-			time.Sleep(1 * time.Second)
-			continue
+			sarama.Logger.Printf("Failed to get partition owner for %s from Zookeeper: %s. Trying again in 1 second...", pm.partition.Key(), err)
+			select {
+			case <-time.After(1 * time.Second):
+				continue
+			case <-pm.t.Dying():
+				return tomb.ErrDying
+			}
 		}
 
 		if owner != nil {
@@ -163,11 +192,8 @@ func (pm *partitionManager) claimPartition() error {
 			sarama.Logger.Printf("Partition %s is currently claimed by instance %s. Waiting for it to be released...", pm.partition.Key(), owner.ID)
 			select {
 			case <-changed:
-				// The claim that is being watched was changed, let's try again!
 				continue
-
 			case <-pm.t.Dying():
-				// The partition manager is shutting down, so let's bail
 				return tomb.ErrDying
 			}
 
@@ -175,6 +201,7 @@ func (pm *partitionManager) claimPartition() error {
 
 			err := pm.parent.instance.ClaimPartition(pm.partition.Topic().Name, pm.partition.ID)
 			if err != nil {
+				sarama.Logger.Printf("Fail to claim ownership for %s: %s. Trying again...", pm.partition.Key(), err)
 				continue
 			}
 
@@ -195,12 +222,6 @@ func (pm *partitionManager) startPartitionConsumer(initialOffset int64) (sarama.
 	)
 
 	for {
-		select {
-		case <-pm.t.Dying():
-			return nil, tomb.ErrDying
-		default:
-		}
-
 		pc, err = pm.parent.consumer.ConsumePartition(pm.partition.Topic().Name, pm.partition.ID, initialOffset)
 		switch err {
 		case nil:
@@ -231,11 +252,13 @@ func (pm *partitionManager) startPartitionConsumer(initialOffset int64) (sarama.
 			// Assume the problem is temporary; just try again.
 			// FIXME: Do we want to treat all errors like this?
 			// FIXME: Should te sleep by configurable?
-			sarama.Logger.Printf("Failed to start consuming partition for %s: %s\n", pm.partition.Key(), err)
-			sarama.Logger.Printf("Trying again in 1 second...")
-			time.Sleep(1 * time.Second)
-
-			continue
+			sarama.Logger.Printf("Failed to start consuming partition for %s: %s. Trying again in 1 second...\n", pm.partition.Key(), err)
+			select {
+			case <-pm.t.Dying():
+				return nil, tomb.ErrDying
+			case <-time.After(1 * time.Second):
+				continue
+			}
 		}
 
 	}
