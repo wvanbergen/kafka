@@ -67,8 +67,8 @@ func ExampleConsumer() {
 		log.Println(string(message.Value))
 		eventCount += 1
 
-		// Ack message
-		consumer.Commit(message)
+		// Acknowledge that the message has been processed
+		consumer.Ack(message)
 	}
 
 	log.Printf("Processed %d events.", eventCount)
@@ -189,7 +189,7 @@ func assertMessages(t *testing.T, consumer Consumer, total int) {
 
 		case msg := <-consumer.Messages():
 			count++
-			consumer.Commit(msg)
+			consumer.Ack(msg)
 
 			if count == total {
 				t.Logf("Consumed all %d messages.", total)
@@ -222,6 +222,8 @@ func saramaClient(t *testing.T) sarama.Client {
 
 func produceMessages(t *testing.T, topic string, count int) {
 	client := saramaClient(t)
+	defer client.Close()
+
 	producer, err := sarama.NewAsyncProducerFromClient(client)
 	if err != nil {
 		t.Fatal("Failed to open Kafka producer:", err)
@@ -244,6 +246,7 @@ func produceMessages(t *testing.T, topic string, count int) {
 
 func assertOffsets(t *testing.T, topics []string, offsetTotal int64, count int) {
 	client := saramaClient(t)
+	defer client.Close()
 
 	var newOffsetTotal int64
 	for _, topic := range topics {
@@ -272,6 +275,8 @@ func assertOffsets(t *testing.T, topics []string, offsetTotal int64, count int) 
 
 func setupOffsets(t *testing.T, group string, topics []string) int64 {
 	client := saramaClient(t)
+	defer client.Close()
+
 	offsetManager, err := sarama.NewOffsetManagerFromClient(group, client)
 	if err != nil {
 		t.Fatal("Failed to open Kafka offset manager:", err)

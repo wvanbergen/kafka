@@ -24,19 +24,19 @@ type Consumer interface {
 	Close() error
 
 	// Messages returns a channel that you can read to obtain messages from Kafka to process.
-	// Every message that you receive from this channel should be sent to Commit after it has been processed.
+	// Every message that you receive from this channel should be sent to Ack after it has been processed.
 	Messages() <-chan *sarama.ConsumerMessage
 
 	// Error returns a channel that you can read to obtain errors that occur.
 	Errors() <-chan error
 
-	// Commit marks a message as processed, indicating that the message offset can be committed
+	// Ack marks a message as processed, indicating that the message offset can be committed
 	// for the message's partition by the offset manager. Note that the offset manager may decide
 	// not to commit every offset immediately for effeciency reasons. Calling Close or Interrupt
 	// will make sure that the last offset provided to this function will be flushed to storage.
 	// You have to provide the messages in the same order as you received them from the Messages
 	// channel.
-	Commit(*sarama.ConsumerMessage)
+	Ack(*sarama.ConsumerMessage)
 }
 
 // Join joins a Kafka consumer group, and returns a Consumer instance.
@@ -44,7 +44,8 @@ type Consumer interface {
 //   a consumer group should use the same name. A group name must be unique per Kafka cluster.
 // - `subscription` is an object that describes what partitions the group wants to consume.
 //   A single instance may end up consuming between zero of them, or all of them, or any number
-//   in between.
+//   in between. Every running instance in a group should use the same subscription; the behavior
+//   is undefined if that is not the case.
 // - `zookeeper` is the zookeeper connection string, e.g. "zk1:2181,zk2:2181,zk3:2181/chroot"
 // - `config` specifies the configuration. If it is nil, a default configuration is used.
 func Join(name string, subscription Subscription, zookeeper string, config *Config) (Consumer, error) {
@@ -184,18 +185,18 @@ func (cm *consumerManager) Close() error {
 	return cm.t.Wait()
 }
 
-// Commit will dispatch a message to the right partitionManager's commit
+// Ack will dispatch a message to the right partitionManager's ack
 // function, so it can be marked as processed.
-func (cm *consumerManager) Commit(msg *sarama.ConsumerMessage) {
+func (cm *consumerManager) Ack(msg *sarama.ConsumerMessage) {
 	cm.m.RLock()
 	defer cm.m.RUnlock()
 
 	partitionKey := fmt.Sprintf("%s/%d", msg.Topic, msg.Partition)
 	partitionManager := cm.partitionManagers[partitionKey]
 	if partitionManager == nil {
-		sarama.Logger.Printf("ERROR: committed message %d for %s, but this partition is not managed by this consumer!", msg.Offset, partitionKey)
+		sarama.Logger.Printf("ERROR: acked message %d for %s, but this partition is not managed by this consumer!", msg.Offset, partitionKey)
 	} else {
-		partitionManager.commit(msg.Offset)
+		partitionManager.ack(msg.Offset)
 	}
 }
 

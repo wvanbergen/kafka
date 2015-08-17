@@ -76,7 +76,7 @@ func main() {
 		time.Sleep(10 * time.Millisecond)
 
 		offsets[message.Topic][message.Partition] = message.Offset
-		consumer.Commit(message)
+		consumer.Ack(message)
 	}
 
 	log.Printf("Processed %d events.", eventCount)

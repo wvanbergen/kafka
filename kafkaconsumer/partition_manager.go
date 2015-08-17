@@ -109,7 +109,7 @@ func (pm *partitionManager) waitForProcessing() {
 				sarama.Logger.Printf("Offset %d has been processed for %s, continuing shutdown.", lastConsumedOffset, pm.partition.Key())
 			case <-time.After(pm.parent.config.MaxProcessingTime):
 
-				sarama.Logger.Printf("TIMEOUT: offset %d still has not been processed for %s. The last committed offset was %d.", lastConsumedOffset, pm.partition.Key(), lastProcessedOffset)
+				sarama.Logger.Printf("TIMEOUT: offset %d still has not been processed for %s. The last processed offset was %d.", lastConsumedOffset, pm.partition.Key(), lastProcessedOffset)
 			}
 		} else {
 			sarama.Logger.Printf("Offset %d has been processed for %s. Continuing shutdown...", lastConsumedOffset, pm.partition.Key())
@@ -128,7 +128,9 @@ func (pm *partitionManager) close() error {
 	return pm.t.Wait()
 }
 
-func (pm *partitionManager) commit(offset int64) {
+// ack sets the offset on the partition's offset manager, and signals that
+// processing done if the offset is equal to the last consumed offset during shutdown.
+func (pm *partitionManager) ack(offset int64) {
 	pm.offsetManager.SetOffset(offset, "")
 
 	if pm.t.Err() != tomb.ErrStillAlive && offset == atomic.LoadInt64(&pm.lastConsumedOffset) {
