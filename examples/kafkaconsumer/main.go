@@ -24,7 +24,8 @@ var (
 )
 
 func init() {
-	sarama.Logger = log.New(os.Stdout, "[Sarama] ", log.LstdFlags|log.Lshortfile)
+	sarama.Logger = log.New(os.Stdout, "[sarama]        ", log.LstdFlags|log.Lshortfile)
+	kafkaconsumer.Logger = log.New(os.Stdout, "[kafkaconsumer] ", log.LstdFlags|log.Lshortfile)
 }
 
 func main() {
@@ -49,7 +50,7 @@ func main() {
 	go func() {
 		<-c
 		if err := consumer.Close(); err != nil {
-			sarama.Logger.Println("Error closing the consumer", err)
+			log.Println("Error closing the consumer", err)
 		}
 	}()
 

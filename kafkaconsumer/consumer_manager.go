@@ -104,7 +104,7 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 		cm.shutdown()
 		return nil, err
 	} else {
-		sarama.Logger.Printf("Consumer instance registered (%s).", cm.instance.ID)
+		Logger.Printf("Consumer instance registered (%s).", cm.instance.ID)
 	}
 
 	// Discover the Kafka brokers
@@ -113,7 +113,7 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 		cm.shutdown()
 		return nil, err
 	} else {
-		sarama.Logger.Printf("Discovered Kafka cluster at %s", strings.Join(brokers, ","))
+		Logger.Printf("Discovered Kafka cluster at %s", strings.Join(brokers, ","))
 	}
 
 	// Initialize sarama client
@@ -194,7 +194,7 @@ func (cm *consumerManager) Ack(msg *sarama.ConsumerMessage) {
 	partitionKey := fmt.Sprintf("%s/%d", msg.Topic, msg.Partition)
 	partitionManager := cm.partitionManagers[partitionKey]
 	if partitionManager == nil {
-		sarama.Logger.Printf("ERROR: acked message %d for %s, but this partition is not managed by this consumer!", msg.Offset, partitionKey)
+		Logger.Printf("ERROR: acked message %d for %s, but this partition is not managed by this consumer!", msg.Offset, partitionKey)
 	} else {
 		partitionManager.ack(msg.Offset)
 	}
@@ -222,7 +222,7 @@ func (cm *consumerManager) run() {
 			return
 		}
 
-		sarama.Logger.Printf("Currently, %d instances are registered, to consume %d partitions in total.", len(instances), len(partitions))
+		Logger.Printf("Currently, %d instances are registered, to consume %d partitions in total.", len(instances), len(partitions))
 
 		var (
 			partitionDistribution = distributePartitionsBetweenConsumers(instances, retrievePartitionLeaders(partitions))
@@ -237,14 +237,14 @@ func (cm *consumerManager) run() {
 
 		select {
 		case <-cm.t.Dying():
-			sarama.Logger.Printf("Consumer was interrupted, shutting down...")
+			Logger.Printf("Consumer was interrupted, shutting down...")
 			return
 
 		case <-partitionsChanged:
-			sarama.Logger.Printf("Woke up because the subscription reported a change in partitions.")
+			Logger.Printf("Woke up because the subscription reported a change in partitions.")
 
 		case <-instancesChanged:
-			sarama.Logger.Printf("Woke up because the list of running instances changed.")
+			Logger.Printf("Woke up because the list of running instances changed.")
 		}
 	}
 }
@@ -269,7 +269,7 @@ func (cm *consumerManager) watchSubscription() (kazoo.PartitionList, <-chan zk.E
 
 		partitions, partitionsChanged, err = cm.subscription.WatchPartitions(cm.kz)
 		if err != nil {
-			sarama.Logger.Printf("Failed to watch subscription: %s. Trying again in 1 second...", err)
+			Logger.Printf("Failed to watch subscription: %s. Trying again in 1 second...", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -298,7 +298,7 @@ func (cm *consumerManager) watchConsumerInstances() (kazoo.ConsumergroupInstance
 
 		instances, instancesChanged, err = cm.group.WatchInstances()
 		if err != nil {
-			sarama.Logger.Printf("Failed to watch onsumer group instances: %s. Trying again in 1 second...", err)
+			Logger.Printf("Failed to watch onsumer group instances: %s. Trying again in 1 second...", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -328,7 +328,7 @@ func (cm *consumerManager) startPartitionManager(partition *kazoo.Partition) {
 // from the partitionManagers map.
 func (cm *consumerManager) stopPartitionManager(pm *partitionManager) {
 	if err := pm.close(); err != nil {
-		sarama.Logger.Printf("Failed to cleanly shut down consumer for %s: %s", pm.partition.Key(), err)
+		Logger.Printf("Failed to cleanly shut down consumer for %s: %s", pm.partition.Key(), err)
 	}
 
 	cm.m.Lock()
@@ -343,7 +343,7 @@ func (cm *consumerManager) managePartitionManagers(assignedPartitions map[string
 	var wg sync.WaitGroup
 
 	cm.m.RLock()
-	sarama.Logger.Printf("This instance is assigned to consume %d partitions, and is currently consuming %d partitions.", len(assignedPartitions), len(cm.partitionManagers))
+	Logger.Printf("This instance is assigned to consume %d partitions, and is currently consuming %d partitions.", len(assignedPartitions), len(cm.partitionManagers))
 
 	// Stop consumers for partitions that we were not already consuming
 	for partitionKey, pm := range cm.partitionManagers {
@@ -386,25 +386,25 @@ func (cm *consumerManager) shutdown() {
 
 	if cm.consumer != nil {
 		if err := cm.consumer.Close(); err != nil {
-			sarama.Logger.Print("Failed to close Kafka client:", err)
+			Logger.Print("Failed to close Kafka client:", err)
 		}
 	}
 
 	if cm.client != nil {
 		if err := cm.client.Close(); err != nil {
-			sarama.Logger.Print("Failed to close Kafka offset manager:", err)
+			Logger.Print("Failed to close Kafka offset manager:", err)
 		}
 	}
 
 	if cm.instance != nil {
 		if err := cm.instance.Deregister(); err != nil {
-			sarama.Logger.Print("Failed to deregister consumer instance:", err)
+			Logger.Print("Failed to deregister consumer instance:", err)
 		}
 	}
 
 	if cm.kz != nil {
 		if err := cm.kz.Close(); err != nil {
-			sarama.Logger.Print("Failed to close Zookeeper connection:", err)
+			Logger.Print("Failed to close Zookeeper connection:", err)
 		}
 	}
 

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Shopify/sarama"
 	"github.com/samuel/go-zookeeper/zk"
 	"github.com/wvanbergen/kazoo-go"
 )
@@ -76,7 +75,7 @@ func (ss *staticSubscription) WatchPartitions(kz *kazoo.Kazoo) (kazoo.PartitionL
 		if exists, err := topic.Exists(); err != nil {
 			return nil, nil, err
 		} else if !exists {
-			sarama.Logger.Printf("Attempted to subscribe to %s, but this topic does not appear to exist. Ignoring...", topic.Name)
+			Logger.Printf("Attempted to subscribe to %s, but this topic does not appear to exist. Ignoring...", topic.Name)
 			continue
 		}
 

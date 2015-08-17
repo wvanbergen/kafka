@@ -29,7 +29,7 @@ func init() {
 	}
 
 	if os.Getenv("DEBUG") != "" {
-		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
+		Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
 	}
 
 	fmt.Printf("Using Zookeeper cluster at %s\n", zookeeper)

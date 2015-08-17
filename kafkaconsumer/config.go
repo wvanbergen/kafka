@@ -1,7 +1,6 @@
 package kafkaconsumer
 
 import (
-	"errors"
 	"time"
 
 	"github.com/Shopify/sarama"
@@ -40,7 +39,7 @@ func (cgc *Config) Validate() error {
 	}
 
 	if cgc.Offsets.Initial != sarama.OffsetOldest && cgc.Offsets.Initial != sarama.OffsetNewest {
-		return errors.New("Offsets.Initial should be sarama.OffsetOldest or sarama.OffsetNewest.")
+		return sarama.ConfigurationError("Offsets.Initial should be sarama.OffsetOldest or sarama.OffsetNewest.")
 	}
 
 	if cgc.Config != nil {
@@ -50,4 +49,12 @@ func (cgc *Config) Validate() error {
 	}
 
 	return nil
+}
+
+var Logger sarama.StdLogger
+
+func init() {
+	if Logger == nil {
+		Logger = sarama.Logger
+	}
 }
