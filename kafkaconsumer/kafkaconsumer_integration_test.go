@@ -2,10 +2,12 @@ package kafkaconsumer
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +22,8 @@ const (
 
 var (
 	// By default, assume we're using Sarama's vagrant cluster when running tests
-	zookeeper = kazoo.BuildConnectionString([]string{"192.168.100.67:2181", "192.168.100.67:2182", "192.168.100.67:2183", "192.168.100.67:2184", "192.168.100.67:2185"})
+	zookeeper    = kazoo.BuildConnectionString([]string{"192.168.100.67:2181", "192.168.100.67:2182", "192.168.100.67:2183", "192.168.100.67:2184", "192.168.100.67:2185"})
+	kafkaBrokers []string
 )
 
 func init() {
@@ -33,6 +36,20 @@ func init() {
 	}
 
 	fmt.Printf("Using Zookeeper cluster at %s\n", zookeeper)
+
+	zkNodes, _ := kazoo.ParseConnectionString(zookeeper)
+	kz, err := kazoo.NewKazoo(zkNodes, nil)
+	if err != nil {
+		log.Fatal("Failed to connect to Zookeeper:", err)
+	}
+	defer kz.Close()
+
+	brokers, err := kz.BrokerList()
+	if err != nil {
+		log.Fatal("Failed to retrieve broker list from Zookeeper:", err)
+	}
+
+	kafkaBrokers = brokers
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -79,69 +96,119 @@ func ExampleConsumer() {
 ////////////////////////////////////////////////////////////////////
 
 func TestFunctionalSingleConsumerSingleTopic(t *testing.T) {
-	offsetTotal := setupOffsets(t, "kafkaconsumer.TestSingleConsumerSingleTopic", []string{"test.4"})
-	produceMessages(t, "test.4", 100)
+	ts := newTestState(t, "kafkaconsumer.TestSingleConsumerSingleTopic")
+	ts.prepareConsumer([]string{"test.4"})
+	ts.produceMessages("test.4", 100)
 
 	consumer, err := Join("kafkaconsumer.TestSingleConsumerSingleTopic", TopicSubscription("test.4"), zookeeper, nil)
 	if err != nil {
 		t.Fatal(t)
 	}
-	defer consumer.Close()
 
-	assertMessages(t, consumer, 100)
-	assertOffsets(t, []string{"test.4"}, offsetTotal, 100)
+	ts.assertMessages(consumer, 100)
+
+	safeClose(t, consumer)
+	ts.assertDrained(consumer)
+
+	ts.assertOffsets()
 }
 
 func TestFunctionalSingleConsumerMultipleTopics(t *testing.T) {
-	offsetTotal := setupOffsets(t, "kafkaconsumer.TestSingleConsumerMultipleTopics", []string{"test.4", "test.1"})
-	produceMessages(t, "test.4", 100)
-	produceMessages(t, "test.1", 200)
+	ts := newTestState(t, "kafkaconsumer.TestSingleConsumerMultipleTopics")
+	ts.prepareConsumer([]string{"test.4", "test.1"})
+
+	ts.produceMessages("test.4", 100)
+	ts.produceMessages("test.1", 200)
 
 	consumer, err := Join("kafkaconsumer.TestSingleConsumerMultipleTopics", TopicSubscription("test.4", "test.1"), zookeeper, nil)
 	if err != nil {
 		t.Fatal(t)
 	}
-	defer consumer.Close()
 
-	assertMessages(t, consumer, 300)
-	assertOffsets(t, []string{"test.4", "test.1"}, offsetTotal, 300)
+	ts.assertMessages(consumer, 300)
+
+	safeClose(t, consumer)
+	ts.assertDrained(consumer)
+
+	ts.assertOffsets()
 }
 
 // For this test, we produce 100 messages, and then consume the first 50 messages with
 // the first consumer, and the last 50 messages with a second consumer
 func TestFunctionalSerialConsumersSingleTopic(t *testing.T) {
-	offsetTotal := setupOffsets(t, "kafkaconsumer.TestSerialConsumersSingleTopic", []string{"test.4"})
-	produceMessages(t, "test.4", 100)
+	ts := newTestState(t, "kafkaconsumer.TestSerialConsumersSingleTopic")
+	ts.prepareConsumer([]string{"test.4"})
+	ts.produceMessages("test.4", 100)
 
 	consumer1, err := Join("kafkaconsumer.TestSerialConsumersSingleTopic", TopicSubscription("test.4"), zookeeper, nil)
 	if err != nil {
 		t.Fatal(t)
 	}
 
-	assertMessages(t, consumer1, 50)
-	consumer1.Close()
+	ts.assertMessages(consumer1, 50)
+
+	safeClose(t, consumer1)
+	// Consumer 1 may not be fully drained, but the messages that are in the pipeline won't
+	// be committed, and will eventually be consumed by consumer2 instead
 
 	consumer2, err := Join("kafkaconsumer.TestSerialConsumersSingleTopic", TopicSubscription("test.4"), zookeeper, nil)
 	if err != nil {
 		t.Fatal(t)
 	}
 
-	assertMessages(t, consumer2, 50)
-	consumer2.Close()
+	ts.assertMessages(consumer2, 50)
 
-	assertOffsets(t, []string{"test.4"}, offsetTotal, 100)
+	safeClose(t, consumer2)
+	// Consumer 2 should be fully drained though
+	ts.assertDrained(consumer2)
+
+	ts.assertOffsets()
 }
 
-func TestFunctionalParallelConsumersSingleTopic(t *testing.T) {
-	offsetTotal := setupOffsets(t, "kafkaconsumer.TestFunctionalParallelConsumersSingleTopic", []string{"test.4"})
-	produceMessages(t, "test.4", 100)
+func TestFunctionalParallelConsumers(t *testing.T) {
+	ts := newTestState(t, "kafkaconsumer.TestFunctionalParallelConsumers")
+	ts.prepareConsumer([]string{"test.64"})
+	ts.produceMessages("test.64", 1000)
 
-	consumer1, err := Join("kafkaconsumer.TestFunctionalParallelConsumersSingleTopic", TopicSubscription("test.4"), zookeeper, nil)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			consumer, err := Join("kafkaconsumer.TestFunctionalParallelConsumers", TopicSubscription("test.64"), zookeeper, nil)
+			if err != nil {
+				t.Fatal(t)
+			}
+
+			go func() {
+				<-ts.done
+				consumer.Interrupt()
+			}()
+
+			ts.assertAllMessages(consumer)
+		}()
+	}
+
+	wg.Wait()
+	ts.assertOffsets()
+}
+
+func TestFunctionalParallelConsumersWithInterruption(t *testing.T) {
+	ts := newTestState(t, "kafkaconsumer.TestFunctionalParallelConsumersWithInterruption")
+	ts.prepareConsumer([]string{"test.4"})
+	ts.produceMessages("test.4", 100)
+
+	config := NewConfig()
+	config.MaxProcessingTime = 500 * time.Millisecond
+
+	consumer1, err := Join("kafkaconsumer.TestFunctionalParallelConsumersWithInterruption", TopicSubscription("test.4"), zookeeper, config)
 	if err != nil {
 		t.Fatal(t)
 	}
 
-	consumer2, err := Join("kafkaconsumer.TestFunctionalParallelConsumersSingleTopic", TopicSubscription("test.4"), zookeeper, nil)
+	consumer2, err := Join("kafkaconsumer.TestFunctionalParallelConsumersWithInterruption", TopicSubscription("test.4"), zookeeper, config)
 	if err != nil {
 		t.Fatal(t)
 	}
@@ -154,157 +221,238 @@ func TestFunctionalParallelConsumersSingleTopic(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		assertMessages(t, consumer1, 25)
+		ts.assertMessages(consumer1, 25)
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		assertMessages(t, consumer2, 25)
+		ts.assertMessages(consumer2, 25)
 	}()
 
 	wg.Wait()
 
 	// Now, we close one consumer, which means that the second consumer will consume all other messages.
-	consumer1.Close()
+	safeClose(t, consumer1)
 
-	assertMessages(t, consumer2, 50)
+	ts.assertMessages(consumer2, 50)
 
-	consumer2.Close()
-	assertOffsets(t, []string{"test.4"}, offsetTotal, 100)
+	// Now, close the second consumer
+	safeClose(t, consumer2)
+	ts.assertDrained(consumer2)
+
+	ts.assertOffsets()
 }
 
 ////////////////////////////////////////////////////////////////////
 // Helper functions
 ////////////////////////////////////////////////////////////////////
 
-func assertMessages(t *testing.T, consumer Consumer, total int) {
+func safeClose(t *testing.T, c io.Closer) {
+	if err := c.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
+func newTestState(t *testing.T, group string) *testState {
+	return &testState{t: t, group: group, done: make(chan struct{})}
+}
+
+type testState struct {
+	t           *testing.T
+	group       string
+	c           sarama.Client
+	coord       *sarama.Broker
+	offsetTotal int64
+	topics      []string
+	produced    int64
+	consumed    int64
+	done        chan struct{}
+}
+
+func (ts *testState) close() {
+	if ts.client != nil {
+		safeClose(ts.t, ts.c)
+	}
+}
+
+func (ts *testState) client() sarama.Client {
+	if ts.c == nil {
+		config := sarama.NewConfig()
+		config.Producer.Partitioner = sarama.NewRoundRobinPartitioner
+
+		client, err := sarama.NewClient(kafkaBrokers, config)
+		if err != nil {
+			ts.t.Fatal("Failed to connect to Kafka:", err)
+		}
+
+		ts.c = client
+	}
+
+	return ts.c
+}
+
+func (ts *testState) coordinator() *sarama.Broker {
+	if ts.coord == nil {
+		coordinator, err := ts.client().Coordinator(ts.group)
+		if err != nil {
+			ts.t.Fatal(err)
+		}
+		ts.coord = coordinator
+	}
+
+	return ts.coord
+}
+
+func (ts *testState) prepareConsumer(topics []string) {
+	client := ts.client()
+	coordinator := ts.coordinator()
+
+	request := &sarama.OffsetCommitRequest{
+		Version:       1,
+		ConsumerGroup: ts.group,
+	}
+
+	ts.topics = topics
+	for _, topic := range topics {
+		partitions, err := client.Partitions(topic)
+		if err != nil {
+			ts.t.Fatal("Failed to retrieve list of partitions:", err)
+		}
+
+		for _, partition := range partitions {
+			offset, err := client.GetOffset(topic, partition, sarama.OffsetNewest)
+			if err != nil {
+				ts.t.Fatal("Failed to get latest offset for partition:", err)
+			}
+			ts.offsetTotal += offset - 1
+
+			request.AddBlock(topic, partition, offset-1, 0, "")
+			ts.t.Logf("Setting initial offset for %s/%d: %d.", topic, partition, offset)
+		}
+	}
+
+	response, err := coordinator.CommitOffset(request)
+	if err != nil {
+		ts.t.Fatalf("Failed to commit offsets for consumergroup:", err)
+	}
+
+	for topic, errors := range response.Errors {
+		for partition, err := range errors {
+			if err != sarama.ErrNoError {
+				ts.t.Fatalf("Failed to commit offsets for %s/%d: %s", topic, partition, err)
+			}
+		}
+	}
+}
+
+func (ts *testState) produceMessages(topic string, count int64) {
+	producer, err := sarama.NewAsyncProducerFromClient(ts.client())
+	if err != nil {
+		ts.t.Fatal("Failed to open Kafka producer:", err)
+	}
+	defer producer.Close()
+
+	go func() {
+		for err := range producer.Errors() {
+			ts.t.Errorf("Failed to produce message:", err)
+		}
+	}()
+
+	for i := int64(0); i < count; i++ {
+		producer.Input() <- &sarama.ProducerMessage{
+			Topic: topic,
+			Value: sarama.StringEncoder(fmt.Sprintf("%d", count)),
+		}
+	}
+
+	atomic.AddInt64(&ts.produced, count)
+	ts.t.Logf("Produced %d messages to %s", count, topic)
+}
+
+func (ts *testState) assertAllMessages(consumer Consumer) {
+	var count int64
+	for msg := range consumer.Messages() {
+		count++
+		atomic.AddInt64(&ts.consumed, 1)
+		consumer.Ack(msg)
+
+		if atomic.LoadInt64(&ts.produced) == atomic.LoadInt64(&ts.consumed) {
+			close(ts.done)
+		}
+	}
+
+	ts.t.Logf("Consumed %d out of %d messages.", count, atomic.LoadInt64(&ts.produced))
+}
+
+func (ts *testState) assertMessages(consumer Consumer, total int) {
 	timeout := time.After(10 * time.Second)
 	count := 0
 	for {
 		select {
 		case <-timeout:
-			t.Errorf("TIMEOUT: only consumed %d/%d messages", count, total)
+			ts.t.Errorf("TIMEOUT: only consumed %d/%d messages", count, total)
 			return
 
 		case msg := <-consumer.Messages():
 			count++
+			atomic.AddInt64(&ts.consumed, 1)
 			consumer.Ack(msg)
 
 			if count == total {
-				t.Logf("Consumed all %d messages.", total)
+				ts.t.Logf("Consumed %d out of %d messages.", total, atomic.LoadInt64(&ts.produced))
 				return
 			}
 		}
 	}
 }
 
-func saramaClient(t *testing.T) sarama.Client {
-	zkNodes, _ := kazoo.ParseConnectionString(zookeeper)
-	kz, err := kazoo.NewKazoo(zkNodes, nil)
-	if err != nil {
-		t.Fatal("Failed to connect to Zookeeper:", err)
-	}
-	defer kz.Close()
-
-	brokers, err := kz.BrokerList()
-	if err != nil {
-		t.Fatal("Failed to retrieve broker list from Zookeeper:", err)
-	}
-
-	client, err := sarama.NewClient(brokers, nil)
-	if err != nil {
-		t.Fatal("Failed to connect to Kafka:", err)
-	}
-
-	return client
-}
-
-func produceMessages(t *testing.T, topic string, count int) {
-	client := saramaClient(t)
-	defer client.Close()
-
-	producer, err := sarama.NewAsyncProducerFromClient(client)
-	if err != nil {
-		t.Fatal("Failed to open Kafka producer:", err)
-	}
-	defer producer.Close()
-
-	go func() {
-		for err := range producer.Errors() {
-			t.Errorf("Failed to produce message:", err)
-		}
-	}()
-
-	for i := 0; i < count; i++ {
-		producer.Input() <- &sarama.ProducerMessage{
-			Topic: topic,
-			Value: sarama.StringEncoder(fmt.Sprintf("%d", count)),
-		}
+func (ts *testState) assertDrained(consumer Consumer) {
+	if _, ok := <-consumer.Messages(); ok {
+		ts.t.Error("Expected messages channel of consumer to be drained")
 	}
 }
 
-func assertOffsets(t *testing.T, topics []string, offsetTotal int64, count int) {
-	client := saramaClient(t)
-	defer client.Close()
+func (ts *testState) assertOffsets() {
+	defer ts.close()
+
+	request := &sarama.OffsetFetchRequest{
+		Version:       1,
+		ConsumerGroup: ts.group,
+	}
+
+	for _, topic := range ts.topics {
+		partitions, err := ts.client().Partitions(topic)
+		if err != nil {
+			ts.t.Fatal("Failed to retrieve list of partitions:", err)
+		}
+
+		for _, partition := range partitions {
+			request.AddPartition(topic, partition)
+		}
+	}
+
+	response, err := ts.coordinator().FetchOffset(request)
+	if err != nil {
+		ts.t.Fatal("Failed to fetch committed offsets", err)
+	}
 
 	var newOffsetTotal int64
-	for _, topic := range topics {
-		partitions, err := client.Partitions(topic)
-		if err != nil {
-			t.Fatal("Failed to retrieve list of partitions:", err)
-		}
-
-		for _, partition := range partitions {
-
-			offset, err := client.GetOffset(topic, partition, sarama.OffsetNewest)
-			if err != nil {
-				t.Fatal("Failed to get latest offset for partition:", err)
+	for topic, partitions := range response.Blocks {
+		for partition, block := range partitions {
+			if block.Err != sarama.ErrNoError {
+				ts.t.Fatalf("%s/%d: %s", topic, partition, block.Err)
 			}
 
-			newOffsetTotal += offset
+			ts.t.Logf("Committed offset for %s/%d: %d", topic, partition, block.Offset)
+			newOffsetTotal += block.Offset
 		}
 	}
 
-	if newOffsetTotal-offsetTotal != int64(count) {
-		t.Errorf("Expected the offsets to have increased by %d, but increment was %d", count, newOffsetTotal-offsetTotal)
+	produced := atomic.LoadInt64(&ts.produced)
+	if newOffsetTotal-ts.offsetTotal != produced {
+		ts.t.Errorf("Expected the offsets to have increased by %d, but increment was %d", produced, newOffsetTotal-ts.offsetTotal)
 	} else {
-		t.Logf("The offsets stored in Kafka have increased by %d", count)
+		ts.t.Logf("The offsets stored in Kafka have increased by %d", produced)
 	}
-}
-
-func setupOffsets(t *testing.T, group string, topics []string) int64 {
-	client := saramaClient(t)
-	defer client.Close()
-
-	offsetManager, err := sarama.NewOffsetManagerFromClient(group, client)
-	if err != nil {
-		t.Fatal("Failed to open Kafka offset manager:", err)
-	}
-
-	var offsetTotal int64
-	for _, topic := range topics {
-		partitions, err := client.Partitions(topic)
-		if err != nil {
-			t.Fatal("Failed to retrieve list of partitions:", err)
-		}
-
-		for _, partition := range partitions {
-			pom, err := offsetManager.ManagePartition(topic, partition)
-			if err != nil {
-				t.Fatal("Failed to start offset manager for partition:", err)
-			}
-			defer pom.Close()
-
-			offset, err := client.GetOffset(topic, partition, sarama.OffsetNewest)
-			if err != nil {
-				t.Fatal("Failed to get latest offset for partition:", err)
-			}
-
-			t.Logf("Setting initial offset for %s/%d: %d.", topic, partition, offset)
-			pom.SetOffset(offset-1, "Set by integration test")
-			offsetTotal += offset
-		}
-	}
-	return offsetTotal
 }
