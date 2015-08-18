@@ -32,7 +32,7 @@ type Consumer interface {
 
 	// Ack marks a message as processed, indicating that the message offset can be committed
 	// for the message's partition by the offset manager. Note that the offset manager may decide
-	// not to commit every offset immediately for effeciency reasons. Calling Close or Interrupt
+	// not to commit every offset immediately for efficiency reasons. Calling Close or Interrupt
 	// will make sure that the last offset provided to this function will be flushed to storage.
 	// You have to provide the messages in the same order as you received them from the Messages
 	// channel.
@@ -48,8 +48,8 @@ type Consumer interface {
 //   is undefined if that is not the case.
 // - `zookeeper` is the zookeeper connection string, e.g. "zk1:2181,zk2:2181,zk3:2181/chroot"
 // - `config` specifies the configuration. If it is nil, a default configuration is used.
-func Join(name string, subscription Subscription, zookeeper string, config *Config) (Consumer, error) {
-	if name == "" {
+func Join(group string, subscription Subscription, zookeeper string, config *Config) (Consumer, error) {
+	if group == "" {
 		return nil, sarama.ConfigurationError("a group name cannot be empty")
 	}
 
@@ -79,7 +79,7 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 		cm.kz = kz
 	}
 
-	cm.group = cm.kz.Consumergroup(name)
+	cm.group = cm.kz.Consumergroup(group)
 	cm.instance = cm.group.NewInstance()
 
 	// Register the consumer group if it does not exist yet
@@ -125,7 +125,7 @@ func Join(name string, subscription Subscription, zookeeper string, config *Conf
 	}
 
 	// Initialize sarama offset manager
-	if offsetManager, err := sarama.NewOffsetManagerFromClient(name, cm.client); err != nil {
+	if offsetManager, err := sarama.NewOffsetManagerFromClient(group, cm.client); err != nil {
 		cm.shutdown()
 		return nil, err
 	} else {

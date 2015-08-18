@@ -210,7 +210,7 @@ func (pm *partitionManager) claimPartition() error {
 	}
 }
 
-// closePartitionConsumer starts a sarama consumer for the partition under management.
+// startPartitionConsumer starts a sarama consumer for the partition under management.
 // This function will retry any error that may occur. The error return value is nil once
 // it successfully has started the partition consumer, or tomb.ErrDying if the partition
 // manager was interrupted. Any other error is not recoverable.
