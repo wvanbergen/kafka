@@ -76,7 +76,6 @@ func main() {
 		ConsumerGroup: group.Name,
 	}
 
-	var requestBlocks int
 	for topic, partitionOffsets := range offsets {
 		for partition, nextOffset := range partitionOffsets {
 			// In Zookeeper, we store the next offset to process.
@@ -84,7 +83,6 @@ func main() {
 			// So we have to fix an off by one error.
 			lastOffset := nextOffset - 1
 			request.AddBlock(topic, partition, lastOffset, 0, "")
-			requestBlocks++
 		}
 	}
 
