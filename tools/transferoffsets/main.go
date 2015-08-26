@@ -94,6 +94,15 @@ func main() {
 	var errorsFound bool
 	for topic, partitionOffsets := range offsets {
 		for partition, nextOffset := range partitionOffsets {
+			if _, ok := response.Errors[topic]; !ok {
+				log.Printf("[WARNING] %s/%d: topic was not present in response and may not be committed!", topic, partition)
+				continue
+			}
+			if _, ok := response.Errors[topic][partition]; !ok {
+				log.Printf("[WARNING] %s/%d: partition was not present in response and may not be committed!", topic, partition)
+				continue
+			}
+
 			if err := response.Errors[topic][partition]; err == sarama.ErrNoError {
 				log.Printf("%s/%d: %d committed as last processed offset", topic, partition, nextOffset-1)
 			} else {
