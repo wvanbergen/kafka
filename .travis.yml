@@ -17,7 +17,8 @@ before_install:
 - nohup bash -c "cd kafka && bin/kafka-server-start.sh config/server.properties &"
 - sleep 5
 - kafka/bin/kafka-topics.sh --create --partitions 1 --replication-factor 1 --topic test.1 --zookeeper localhost:2181
-- kafka/bin/kafka-topics.sh --create --partitions 4 --replication-factor 1 --topic test.4 --zookeeper localhost:2181 --config retention.ms=604800000
+- kafka/bin/kafka-topics.sh --create --partitions 4 --replication-factor 1 --topic test.4 --zookeeper localhost:2181
+- kafka/bin/kafka-topics.sh --create --partitions 64 --replication-factor 1 --topic test.64 --zookeeper localhost:2181
 - go get golang.org/x/tools/cmd/vet
 
 script:
