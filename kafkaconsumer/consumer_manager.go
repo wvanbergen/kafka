@@ -386,6 +386,12 @@ func (cm *consumerManager) shutdown() {
 		}
 	}
 
+	if cm.offsetManager != nil {
+		if err := cm.offsetManager.Close(); err != nil {
+			cm.logf("Failed to close offset manager: %s", err)
+		}
+	}
+
 	if cm.client != nil {
 		if err := cm.client.Close(); err != nil {
 			cm.logf("Failed to close Kafka offset manager: %s", err)
