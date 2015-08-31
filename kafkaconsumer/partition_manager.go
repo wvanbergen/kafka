@@ -42,17 +42,11 @@ func (pm *partitionManager) run() {
 		return
 	} else {
 		pm.offsetManager = offsetManager
-		defer offsetManager.Close()
+		defer pm.closePartitionOffsetManager()
 	}
 
 	// We are ignoring metadata for now.
-	initialOffset, _ := offsetManager.Offset()
-	if initialOffset < 0 {
-		initialOffset = pm.parent.config.Offsets.Initial
-	} else {
-		// Fix the off by one error: we should start consuming once message after the last committed offset
-		initialOffset += 1
-	}
+	initialOffset, _ := offsetManager.NextOffset()
 	defer pm.waitForProcessing()
 
 	pc, err := pm.startPartitionConsumer(initialOffset)
@@ -95,52 +89,6 @@ func (pm *partitionManager) run() {
 	}
 }
 
-// startPartitionOffsetManager starts a PartitionOffsetManager for the partition, and will
-// retry any errors. The only error value that can be returned is tomb.ErrDying, which is
-// returned when the partition manager is interrupted. Any other error should be considered
-// non-recoverable.
-func (pm *partitionManager) startPartitionOffsetManager() (sarama.PartitionOffsetManager, error) {
-	for {
-		offsetManager, err := pm.parent.offsetManager.ManagePartition(pm.partition.Topic().Name, pm.partition.ID)
-		if err != nil {
-			pm.logf("FAILED to start partition offset manager: %s. Trying again in 1 second...\n", err)
-
-			select {
-			case <-pm.t.Dying():
-				return nil, tomb.ErrDying
-			case <-time.After(1 * time.Second):
-				continue
-			}
-		}
-
-		return offsetManager, nil
-	}
-}
-
-// waitForProcessing waits for all the messages that were consumed for this partition to be processed.
-// The processing can take at most MaxProcessingTime time. After that, those messages are consisered
-// lost and will not be committed. Note that this may cause messages to be processed twice if another
-// partition consumer resumes consuming from this partition later.
-func (pm *partitionManager) waitForProcessing() {
-	lastProcessedOffset, _ := pm.offsetManager.Offset()
-	lastConsumedOffset := atomic.LoadInt64(&pm.lastConsumedOffset)
-
-	if lastConsumedOffset >= 0 {
-		if lastConsumedOffset > lastProcessedOffset {
-			pm.logf("Waiting for offset %d to be processed before shutting down...", lastConsumedOffset)
-
-			select {
-			case <-pm.processingDone:
-				pm.logf("Offset %d has been processed, continuing shutdown.", lastConsumedOffset)
-			case <-time.After(pm.parent.config.MaxProcessingTime):
-				pm.logf("TIMEOUT: offset %d still has not been processed. The last processed offset was %d.", lastConsumedOffset, lastProcessedOffset)
-			}
-		} else {
-			pm.logf("Offset %d has been processed. Continuing shutdown...", lastConsumedOffset)
-		}
-	}
-}
-
 // interrupt initiates the shutdown procedure for the partition manager, and returns immediately.
 func (pm *partitionManager) interrupt() {
 	pm.t.Kill(nil)
@@ -155,7 +103,7 @@ func (pm *partitionManager) close() error {
 // ack sets the offset on the partition's offset manager, and signals that
 // processing done if the offset is equal to the last consumed offset during shutdown.
 func (pm *partitionManager) ack(offset int64) {
-	pm.offsetManager.SetOffset(offset, "")
+	pm.offsetManager.MarkOffset(offset, "")
 
 	if pm.t.Err() != tomb.ErrStillAlive && offset == atomic.LoadInt64(&pm.lastConsumedOffset) {
 		close(pm.processingDone)
@@ -207,6 +155,45 @@ func (pm *partitionManager) claimPartition() error {
 			pm.logf("Claimed partition ownership")
 			return nil
 		}
+	}
+}
+
+// releasePartition releases this instance's claim on this partition in Zookeeper.
+func (pm *partitionManager) releasePartition() {
+	if err := pm.parent.instance.ReleasePartition(pm.partition.Topic().Name, pm.partition.ID); err != nil {
+		pm.logf("FAILED to release partition: %s", err)
+	} else {
+		pm.logf("Released partition.")
+	}
+}
+
+// startPartitionOffsetManager starts a PartitionOffsetManager for the partition, and will
+// retry any errors. The only error value that can be returned is tomb.ErrDying, which is
+// returned when the partition manager is interrupted. Any other error should be considered
+// non-recoverable.
+func (pm *partitionManager) startPartitionOffsetManager() (sarama.PartitionOffsetManager, error) {
+	for {
+		offsetManager, err := pm.parent.offsetManager.ManagePartition(pm.partition.Topic().Name, pm.partition.ID)
+		if err != nil {
+			pm.logf("FAILED to start partition offset manager: %s. Trying again in 1 second...\n", err)
+
+			select {
+			case <-pm.t.Dying():
+				return nil, tomb.ErrDying
+			case <-time.After(1 * time.Second):
+				continue
+			}
+		}
+
+		return offsetManager, nil
+	}
+}
+
+// closePartitionOffsetManager stops the partition offset manager for this partitions, and will write
+// any error that may happen to the logger.
+func (pm *partitionManager) closePartitionOffsetManager() {
+	if err := pm.offsetManager.Close(); err != nil {
+		pm.logf("Failed to close partition offset manager: %s\n", err)
 	}
 }
 
@@ -268,15 +255,32 @@ func (pm *partitionManager) closePartitionConsumer(pc sarama.PartitionConsumer) 
 	}
 }
 
-// releasePartition releases this instance's claim on this partition in Zookeeper.
-func (pm *partitionManager) releasePartition() {
-	if err := pm.parent.instance.ReleasePartition(pm.partition.Topic().Name, pm.partition.ID); err != nil {
-		pm.logf("FAILED to release partition: %s", err)
-	} else {
-		pm.logf("Released partition.")
+// waitForProcessing waits for all the messages that were consumed for this partition to be processed.
+// The processing can take at most MaxProcessingTime time. After that, those messages are consisered
+// lost and will not be committed. Note that this may cause messages to be processed twice if another
+// partition consumer resumes consuming from this partition later.
+func (pm *partitionManager) waitForProcessing() {
+	nextOffset, _ := pm.offsetManager.NextOffset()
+	lastProcessedOffset := nextOffset - 1
+	lastConsumedOffset := atomic.LoadInt64(&pm.lastConsumedOffset)
+
+	if lastConsumedOffset >= 0 {
+		if lastConsumedOffset > lastProcessedOffset {
+			pm.logf("Waiting for offset %d to be processed before shutting down...", lastConsumedOffset)
+
+			select {
+			case <-pm.processingDone:
+				pm.logf("Offset %d has been processed, continuing shutdown.", lastConsumedOffset)
+			case <-time.After(pm.parent.config.MaxProcessingTime):
+				pm.logf("TIMEOUT: offset %d still has not been processed. The last processed offset was %d.", lastConsumedOffset, lastProcessedOffset)
+			}
+		} else {
+			pm.logf("Offset %d has been processed. Continuing shutdown...", lastConsumedOffset)
+		}
 	}
 }
 
+// logf writes a formatted log message to the consumergroup.Logger
 func (pm *partitionManager) logf(format string, arguments ...interface{}) {
 	Logger.Printf(fmt.Sprintf("[instance=%s partition=%s] %s", pm.parent.shortID(), pm.partition.Key(), format), arguments...)
 }
