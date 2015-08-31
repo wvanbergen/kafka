@@ -271,7 +271,7 @@ type testState struct {
 }
 
 func (ts *testState) close() {
-	if ts.client != nil {
+	if ts.c != nil {
 		safeClose(ts.t, ts.c)
 	}
 }
@@ -334,7 +334,7 @@ func (ts *testState) prepareConsumer(topics []string) {
 
 	response, err := coordinator.CommitOffset(request)
 	if err != nil {
-		ts.t.Fatalf("Failed to commit offsets for consumergroup:", err)
+		ts.t.Fatal("Failed to commit offsets for consumergroup:", err)
 	}
 
 	for topic, errors := range response.Errors {
@@ -355,7 +355,7 @@ func (ts *testState) produceMessages(topic string, count int64) {
 
 	go func() {
 		for err := range producer.Errors() {
-			ts.t.Errorf("Failed to produce message:", err)
+			ts.t.Error("Failed to produce message:", err)
 		}
 	}()
 
