@@ -151,7 +151,11 @@ func (zom *zookeeperOffsetManager) FinalizePartition(topic string, partition int
 func (zom *zookeeperOffsetManager) MarkAsProcessed(topic string, partition int32, offset int64) bool {
 	zom.l.RLock()
 	defer zom.l.RUnlock()
-	return zom.offsets[topic][partition].markAsProcessed(offset)
+	if p, ok := zom.offsets[topic][partition]; ok {
+		return p.markAsProcessed(offset)
+	} else {
+		return false
+	}
 }
 
 func (zom *zookeeperOffsetManager) Close() error {
