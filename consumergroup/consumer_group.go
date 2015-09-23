@@ -59,9 +59,19 @@ func (cgc *Config) Validate() error {
 	return nil
 }
 
+type ConsumerGroup interface {
+	Close() error
+	Closed() bool
+	CommitUpto(message *sarama.ConsumerMessage) error
+	Errors() <-chan *sarama.ConsumerError
+	InstanceRegistered() (bool, error)
+	Logf(format string, args ...interface{})
+	Messages() <-chan *sarama.ConsumerMessage
+}
+
 // The ConsumerGroup type holds all the information for a consumer that is part
 // of a consumer group. Call JoinConsumerGroup to start a consumer.
-type ConsumerGroup struct {
+type consumerGroup struct {
 	config *Config
 
 	consumer sarama.Consumer
@@ -81,8 +91,10 @@ type ConsumerGroup struct {
 	offsetManager OffsetManager
 }
 
+var _ ConsumerGroup = &consumerGroup{}
+
 // Connects to a consumer group, using Zookeeper for auto-discovery
-func JoinConsumerGroup(name string, topics []string, zookeeper []string, config *Config) (cg *ConsumerGroup, err error) {
+func JoinConsumerGroup(name string, topics []string, zookeeper []string, config *Config) (cg ConsumerGroup, err error) {
 
 	if name == "" {
 		return nil, sarama.ConfigurationError("Empty consumergroup name")
@@ -126,7 +138,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		return
 	}
 
-	cg = &ConsumerGroup{
+	cgp := &consumerGroup{
 		config:   config,
 		consumer: consumer,
 
@@ -140,15 +152,15 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	}
 
 	// Register consumer group
-	if exists, err := cg.group.Exists(); err != nil {
-		cg.Logf("FAILED to check for existence of consumergroup: %s!\n", err)
+	if exists, err := cgp.group.Exists(); err != nil {
+		cgp.Logf("FAILED to check for existence of consumergroup: %s!\n", err)
 		_ = consumer.Close()
 		_ = kz.Close()
 		return nil, err
 	} else if !exists {
-		cg.Logf("Consumergroup `%s` does not yet exists, creating...\n", cg.group.Name)
-		if err := cg.group.Create(); err != nil {
-			cg.Logf("FAILED to create consumergroup in Zookeeper: %s!\n", err)
+		cgp.Logf("Consumergroup `%s` does not yet exists, creating...\n", cgp.group.Name)
+		if err := cgp.group.Create(); err != nil {
+			cgp.Logf("FAILED to create consumergroup in Zookeeper: %s!\n", err)
 			_ = consumer.Close()
 			_ = kz.Close()
 			return nil, err
@@ -156,36 +168,36 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	}
 
 	// Register itself with zookeeper
-	if err := cg.instance.Register(topics); err != nil {
-		cg.Logf("FAILED to register consumer instance: %s!\n", err)
+	if err := cgp.instance.Register(topics); err != nil {
+		cgp.Logf("FAILED to register consumer instance: %s!\n", err)
 		return nil, err
 	} else {
-		cg.Logf("Consumer instance registered (%s).", cg.instance.ID)
+		cgp.Logf("Consumer instance registered (%s).", cgp.instance.ID)
 	}
 
 	offsetConfig := OffsetManagerConfig{CommitInterval: config.Offsets.CommitInterval}
-	cg.offsetManager = NewZookeeperOffsetManager(cg, &offsetConfig)
+	cgp.offsetManager = NewZookeeperOffsetManager(cgp, &offsetConfig)
 
-	go cg.topicListConsumer(topics)
+	go cgp.topicListConsumer(topics)
 
-	return
+	return cgp, nil
 }
 
 // Returns a channel that you can read to obtain events from Kafka to process.
-func (cg *ConsumerGroup) Messages() <-chan *sarama.ConsumerMessage {
+func (cg *consumerGroup) Messages() <-chan *sarama.ConsumerMessage {
 	return cg.messages
 }
 
 // Returns a channel that you can read to obtain events from Kafka to process.
-func (cg *ConsumerGroup) Errors() <-chan *sarama.ConsumerError {
+func (cg *consumerGroup) Errors() <-chan *sarama.ConsumerError {
 	return cg.errors
 }
 
-func (cg *ConsumerGroup) Closed() bool {
+func (cg *consumerGroup) Closed() bool {
 	return cg.instance == nil
 }
 
-func (cg *ConsumerGroup) Close() error {
+func (cg *consumerGroup) Close() error {
 	shutdownError := AlreadyClosing
 	cg.singleShutdown.Do(func() {
 		defer cg.kazoo.Close()
@@ -217,7 +229,7 @@ func (cg *ConsumerGroup) Close() error {
 	return shutdownError
 }
 
-func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
+func (cg *consumerGroup) Logf(format string, args ...interface{}) {
 	var identifier string
 	if cg.instance == nil {
 		identifier = "(defunct)"
@@ -227,16 +239,16 @@ func (cg *ConsumerGroup) Logf(format string, args ...interface{}) {
 	sarama.Logger.Printf("[%s/%s] %s", cg.group.Name, identifier, fmt.Sprintf(format, args...))
 }
 
-func (cg *ConsumerGroup) InstanceRegistered() (bool, error) {
+func (cg *consumerGroup) InstanceRegistered() (bool, error) {
 	return cg.instance.Registered()
 }
 
-func (cg *ConsumerGroup) CommitUpto(message *sarama.ConsumerMessage) error {
+func (cg *consumerGroup) CommitUpto(message *sarama.ConsumerMessage) error {
 	cg.offsetManager.MarkAsProcessed(message.Topic, message.Partition, message.Offset)
 	return nil
 }
 
-func (cg *ConsumerGroup) topicListConsumer(topics []string) {
+func (cg *consumerGroup) topicListConsumer(topics []string) {
 	for {
 		select {
 		case <-cg.stopper:
@@ -273,7 +285,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 	}
 }
 
-func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, stopper <-chan struct{}) {
+func (cg *consumerGroup) topicConsumer(topic string, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, stopper <-chan struct{}) {
 	defer cg.wg.Done()
 
 	select {
@@ -324,7 +336,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 }
 
 // Consumes a partition
-func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, wg *sync.WaitGroup, stopper <-chan struct{}) {
+func (cg *consumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, wg *sync.WaitGroup, stopper <-chan struct{}) {
 	defer wg.Done()
 
 	select {
