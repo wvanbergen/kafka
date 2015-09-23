@@ -76,21 +76,21 @@ type zookeeperOffsetManager struct {
 	config  *OffsetManagerConfig
 	l       sync.RWMutex
 	offsets offsetsMap
-	cg      *ConsumerGroup
+	cg      *consumerGroup
 
 	closing, closed chan struct{}
 }
 
 // NewZookeeperOffsetManager returns an offset manager that uses Zookeeper
 // to store offsets.
-func NewZookeeperOffsetManager(cg *ConsumerGroup, config *OffsetManagerConfig) OffsetManager {
+func NewZookeeperOffsetManager(cg ConsumerGroup, config *OffsetManagerConfig) OffsetManager {
 	if config == nil {
 		config = NewOffsetManagerConfig()
 	}
 
 	zom := &zookeeperOffsetManager{
 		config:  config,
-		cg:      cg,
+		cg:      cg.(*consumerGroup),
 		offsets: make(offsetsMap),
 		closing: make(chan struct{}),
 		closed:  make(chan struct{}),

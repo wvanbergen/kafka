@@ -194,7 +194,7 @@ func TestSingleTopicSequentialConsumer(t *testing.T) {
 
 type OffsetMap map[string]map[int32]int64
 
-func assertEvents(t *testing.T, cg *ConsumerGroup, count int64, offsets OffsetMap) {
+func assertEvents(t *testing.T, cg ConsumerGroup, count int64, offsets OffsetMap) {
 	var processed int64
 	for processed < count {
 		select {
