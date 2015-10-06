@@ -327,7 +327,7 @@ func (ts *testState) prepareConsumer(topics []string) {
 			}
 			ts.offsetTotal += offset - 1
 
-			request.AddBlock(topic, partition, offset-1, 0, "")
+			request.AddBlock(topic, partition, offset-1, -1, "")
 			ts.t.Logf("Setting initial offset for %s/%d: %d.", topic, partition, offset)
 		}
 	}
