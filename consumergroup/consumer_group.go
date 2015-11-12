@@ -421,7 +421,9 @@ partitionConsumerLoop:
 					break partitionConsumerLoop
 
 				case messages <- message:
-					lastOffset = message.Offset
+					if message != nil {
+						lastOffset = message.Offset
+					}
 					continue partitionConsumerLoop
 				}
 			}
