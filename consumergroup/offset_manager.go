@@ -124,9 +124,9 @@ func (zom *zookeeperOffsetManager) InitializePartition(topic string, partition i
 }
 
 func (zom *zookeeperOffsetManager) FinalizePartition(topic string, partition int32, lastOffset int64, timeout time.Duration) error {
-	zom.l.RLock()
+	zom.l.Lock()
+	defer zom.l.Unlock()
 	tracker := zom.offsets[topic][partition]
-	zom.l.RUnlock()
 
 	if lastOffset >= 0 {
 		if lastOffset-tracker.highestProcessedOffset > 0 {
@@ -141,9 +141,7 @@ func (zom *zookeeperOffsetManager) FinalizePartition(topic string, partition int
 		}
 	}
 
-	zom.l.Lock()
 	delete(zom.offsets[topic], partition)
-	zom.l.Unlock()
 
 	return nil
 }
