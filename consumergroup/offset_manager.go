@@ -115,8 +115,8 @@ func (zom *zookeeperOffsetManager) InitializePartition(topic string, partition i
 	}
 
 	zom.offsets[topic][partition] = &partitionOffsetTracker{
-		highestProcessedOffset: nextOffset - 1,
-		lastCommittedOffset:    nextOffset - 1,
+		highestProcessedOffset: -1,
+		lastCommittedOffset:    -1,
 		done:                   make(chan struct{}),
 	}
 
