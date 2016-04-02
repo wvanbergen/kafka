@@ -277,6 +277,18 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 			return
 
 		case <-consumerChanges:
+			registered, err := cg.instance.Registered()
+			if err != nil {
+				cg.Logf("FAILED to get register status: %s\n", err)
+			} else if !registered {
+				err = cg.instance.Register(topics)
+				if err != nil {
+					cg.Logf("FAILED to register consumer instance: %s!\n", err)
+				} else {
+					cg.Logf("Consumer instance registered (%s).", cg.instance.ID)
+				}
+			}
+
 			cg.Logf("Triggering rebalance due to consumer list change\n")
 			close(stopper)
 			cg.wg.Wait()
