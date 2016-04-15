@@ -123,7 +123,6 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	if config.Offsets.ResetOffsets {
 		err = group.ResetOffsets()
 		if err != nil {
-			cg.Logf("FAILED to reset offsets of consumergroup: %s!\n", err)
 			kz.Close()
 			return
 		}
