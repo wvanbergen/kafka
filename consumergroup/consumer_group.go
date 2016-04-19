@@ -25,6 +25,8 @@ type Config struct {
 		CommitInterval    time.Duration // The interval between which the processed offsets are commited.
 		ResetOffsets      bool          // Resets the offsets for the consumergroup so that it won't resume from where it left off previously.
 	}
+
+	PartitionClaimRetries int
 }
 
 func NewConfig() *Config {
@@ -34,6 +36,7 @@ func NewConfig() *Config {
 	config.Offsets.Initial = sarama.OffsetOldest
 	config.Offsets.ProcessingTimeout = 60 * time.Second
 	config.Offsets.CommitInterval = 10 * time.Second
+	config.PartitionClaimRetries = 3
 
 	return config
 }
@@ -355,10 +358,10 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 	default:
 	}
 
-	for maxRetries, tries := 3, 0; tries < maxRetries; tries++ {
+	for tries := 0; tries < cg.config.PartitionClaimRetries; tries++ {
 		if err := cg.instance.ClaimPartition(topic, partition); err == nil {
 			break
-		} else if err == kazoo.ErrPartitionClaimedByOther && tries+1 < maxRetries {
+		} else if err == kazoo.ErrPartitionClaimedByOther && tries+1 < cg.config.PartitionClaimRetries {
 			time.Sleep(1 * time.Second)
 		} else {
 			cg.Logf("%s/%d :: FAILED to claim the partition: %s\n", topic, partition, err)
