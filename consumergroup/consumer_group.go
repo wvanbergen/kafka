@@ -365,7 +365,18 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 			return
 		}
 	}
-	defer cg.instance.ReleasePartition(topic, partition)
+
+	defer func() {
+		err := cg.instance.ReleasePartition(topic, partition)
+		if err != nil {
+			cg.Logf("%s/%d :: FAILED to release partition: %s\n", topic, partition, err)
+			cg.errors <- &sarama.ConsumerError{
+				Topic:     topic,
+				Partition: partition,
+				Err:       err,
+			}
+		}
+	}()
 
 	nextOffset, err := cg.offsetManager.InitializePartition(topic, partition)
 	if err != nil {
