@@ -439,6 +439,7 @@ partitionConsumerLoop:
 		case err := <-consumer.Errors():
 			if err == nil {
 				consumer, _ = cg.consumePartition(topic, partition, lastOffset)
+				continue partitionConsumerLoop
 			}
 
 			for {
@@ -454,6 +455,7 @@ partitionConsumerLoop:
 		case message := <-consumer.Messages():
 			if message == nil {
 				consumer, _ = cg.consumePartition(topic, partition, lastOffset)
+				continue partitionConsumerLoop
 			}
 
 			for {
