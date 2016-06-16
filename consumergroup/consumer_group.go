@@ -438,7 +438,14 @@ partitionConsumerLoop:
 
 		case err := <-consumer.Errors():
 			if err == nil {
-				consumer, _ = cg.consumePartition(topic, partition, lastOffset)
+				cg.Logf("%s/%d :: Consumer encountered an invalid state: re-establishing consumption of partition.\n", topic, partition)
+
+				// Errors encountered (if any) are logged in the consumerPartition function
+				var cErr error
+				consumer, cErr = cg.consumePartition(topic, partition, lastOffset)
+				if cErr != nil {
+					break partitionConsumerLoop
+				}
 				continue partitionConsumerLoop
 			}
 
@@ -454,8 +461,16 @@ partitionConsumerLoop:
 
 		case message := <-consumer.Messages():
 			if message == nil {
-				consumer, _ = cg.consumePartition(topic, partition, lastOffset)
+				cg.Logf("%s/%d :: Consumer encountered an invalid state: re-establishing consumption of partition.\n", topic, partition)
+
+				// Errors encountered (if any) are logged in the consumerPartition function
+				var cErr error
+				consumer, cErr = cg.consumePartition(topic, partition, lastOffset)
+				if cErr != nil {
+					break partitionConsumerLoop
+				}
 				continue partitionConsumerLoop
+
 			}
 
 			for {
