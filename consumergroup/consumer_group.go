@@ -43,8 +43,8 @@ func (cgc *Config) Validate() error {
 		return sarama.ConfigurationError("ZookeeperTimeout should have a duration > 0")
 	}
 
-	if cgc.Offsets.CommitInterval <= 0 {
-		return sarama.ConfigurationError("CommitInterval should have a duration > 0")
+	if cgc.Offsets.CommitInterval < 0 {
+		return sarama.ConfigurationError("CommitInterval should have a duration >= 0")
 	}
 
 	if cgc.Offsets.Initial != sarama.OffsetOldest && cgc.Offsets.Initial != sarama.OffsetNewest {
@@ -244,6 +244,10 @@ func (cg *ConsumerGroup) InstanceRegistered() (bool, error) {
 func (cg *ConsumerGroup) CommitUpto(message *sarama.ConsumerMessage) error {
 	cg.offsetManager.MarkAsProcessed(message.Topic, message.Partition, message.Offset)
 	return nil
+}
+
+func (cg *ConsumerGroup) FlushOffsets() error {
+	return cg.offsetManager.Flush()
 }
 
 func (cg *ConsumerGroup) topicListConsumer(topics []string) {
