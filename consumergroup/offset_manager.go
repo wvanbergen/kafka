@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/Shopify/sarama"
 )
 
 // OffsetManager is the main interface consumergroup requires to manage offsets of the consumergroup.
@@ -201,7 +203,13 @@ func (zom *zookeeperOffsetManager) offsetCommitter() {
 			close(zom.closed)
 			return
 		case <-tickerChan:
-			zom.commitOffsets()
+			if err := zom.commitOffsets(); err != nil {
+				zom.cg.errors <- &sarama.ConsumerError{
+					Topic:     "",
+					Partition: -1,
+					Err:       err,
+				}
+			}
 		case <-zom.flush:
 			zom.flushErr <- zom.commitOffsets()
 		}
