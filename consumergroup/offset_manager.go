@@ -27,6 +27,10 @@ type OffsetManager interface {
 	// offsets that are higehr than the offsets seen before for the same partition.
 	MarkAsProcessed(topic string, partition int32, offset int64) bool
 
+	// Flush tells the offset manager to immediately commit offsets synchronously and to
+	// return any errors that may have occured during the process.
+	Flush() error
+
 	// FinalizePartition is called when the consumergroup is done consuming a
 	// partition. In this method, the offset manager can flush any remaining offsets to its
 	// backend store. It should return an error if it was not able to commit the offset.
@@ -78,7 +82,8 @@ type zookeeperOffsetManager struct {
 	offsets offsetsMap
 	cg      *ConsumerGroup
 
-	closing, closed chan struct{}
+	closing, closed, flush chan struct{}
+	flushErr               chan error
 }
 
 // NewZookeeperOffsetManager returns an offset manager that uses Zookeeper
@@ -89,11 +94,13 @@ func NewZookeeperOffsetManager(cg *ConsumerGroup, config *OffsetManagerConfig) O
 	}
 
 	zom := &zookeeperOffsetManager{
-		config:  config,
-		cg:      cg,
-		offsets: make(offsetsMap),
-		closing: make(chan struct{}),
-		closed:  make(chan struct{}),
+		config:   config,
+		cg:       cg,
+		offsets:  make(offsetsMap),
+		closing:  make(chan struct{}),
+		closed:   make(chan struct{}),
+		flush:    make(chan struct{}),
+		flushErr: make(chan error),
 	}
 
 	go zom.offsetCommitter()
@@ -158,6 +165,11 @@ func (zom *zookeeperOffsetManager) MarkAsProcessed(topic string, partition int32
 	}
 }
 
+func (zom *zookeeperOffsetManager) Flush() error {
+	zom.flush <- struct{}{}
+	return <-zom.flushErr
+}
+
 func (zom *zookeeperOffsetManager) Close() error {
 	close(zom.closing)
 	<-zom.closed
@@ -176,16 +188,24 @@ func (zom *zookeeperOffsetManager) Close() error {
 }
 
 func (zom *zookeeperOffsetManager) offsetCommitter() {
-	commitTicker := time.NewTicker(zom.config.CommitInterval)
-	defer commitTicker.Stop()
+	var tickerChan <-chan time.Time
+	if zom.config.CommitInterval != 0 {
+		commitTicker := time.NewTicker(zom.config.CommitInterval)
+		tickerChan = commitTicker.C
+		defer commitTicker.Stop()
+	}
 
 	for {
 		select {
 		case <-zom.closing:
 			close(zom.closed)
 			return
-		case <-commitTicker.C:
-			zom.commitOffsets()
+		case <-tickerChan:
+			if err := zom.commitOffsets(); err != nil {
+				zom.cg.errors <- err
+			}
+		case <-zom.flush:
+			zom.flushErr <- zom.commitOffsets()
 		}
 	}
 }
@@ -228,7 +248,7 @@ func (zom *zookeeperOffsetManager) commitOffset(topic string, partition int32, t
 }
 
 // MarkAsProcessed marks the provided offset as highest processed offset if
-// it's higehr than any previous offset it has received.
+// it's higher than any previous offset it has received.
 func (pot *partitionOffsetTracker) markAsProcessed(offset int64) bool {
 	pot.l.Lock()
 	defer pot.l.Unlock()
