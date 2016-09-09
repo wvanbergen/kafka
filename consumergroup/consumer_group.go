@@ -74,7 +74,7 @@ type ConsumerGroup struct {
 	singleShutdown sync.Once
 
 	messages chan *sarama.ConsumerMessage
-	errors   chan *sarama.ConsumerError
+	errors   chan error
 	stopper  chan struct{}
 
 	consumers kazoo.ConsumergroupInstanceList
@@ -145,7 +145,7 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		instance: instance,
 
 		messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
-		errors:   make(chan *sarama.ConsumerError, config.ChannelBufferSize),
+		errors:   make(chan error, config.ChannelBufferSize),
 		stopper:  make(chan struct{}),
 	}
 
@@ -187,7 +187,7 @@ func (cg *ConsumerGroup) Messages() <-chan *sarama.ConsumerMessage {
 }
 
 // Returns a channel that you can read to obtain events from Kafka to process.
-func (cg *ConsumerGroup) Errors() <-chan *sarama.ConsumerError {
+func (cg *ConsumerGroup) Errors() <-chan error {
 	return cg.errors
 }
 
@@ -299,7 +299,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 	}
 }
 
-func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, stopper <-chan struct{}) {
+func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.ConsumerMessage, errors chan<- error, stopper <-chan struct{}) {
 	defer cg.wg.Done()
 
 	select {
@@ -374,7 +374,7 @@ func (cg *ConsumerGroup) consumePartition(topic string, partition int32, nextOff
 }
 
 // Consumes a partition
-func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- *sarama.ConsumerError, wg *sync.WaitGroup, stopper <-chan struct{}) {
+func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- error, wg *sync.WaitGroup, stopper <-chan struct{}) {
 	defer wg.Done()
 
 	select {
