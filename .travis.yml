@@ -2,8 +2,8 @@ language: go
 sudo: false
 
 go:
-- "1.4"
-- "1.5"
+- "1.7"
+- "1.6"
 
 env:
   global:
@@ -19,7 +19,6 @@ before_install:
 - kafka/bin/kafka-topics.sh --create --partitions 1 --replication-factor 1 --topic test.1 --zookeeper localhost:2181
 - kafka/bin/kafka-topics.sh --create --partitions 4 --replication-factor 1 --topic test.4 --zookeeper localhost:2181
 - kafka/bin/kafka-topics.sh --create --partitions 64 --replication-factor 1 --topic test.64 --zookeeper localhost:2181
-- go get golang.org/x/tools/cmd/vet
 
 script:
 - go build ./...
