@@ -302,50 +302,68 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.ConsumerMessage, errors chan<- error, stopper <-chan struct{}) {
 	defer cg.wg.Done()
 
-	select {
-	case <-stopper:
-		return
-	default:
-	}
+	// no retry for the first time because no new partition is created
+	partitionConsumerReinitRetries := 0
 
-	cg.Logf("%s :: Started topic consumer\n", topic)
-
-	// Fetch a list of partition IDs
-	partitions, err := cg.kazoo.Topic(topic).Partitions()
-	if err != nil {
-		cg.Logf("%s :: FAILED to get list of partitions: %s\n", topic, err)
-		cg.errors <- &sarama.ConsumerError{
-			Topic:     topic,
-			Partition: -1,
-			Err:       err,
+	for {
+		select {
+		case <-stopper:
+			return
+		default:
 		}
-		return
-	}
 
-	partitionLeaders, err := retrievePartitionLeaders(partitions)
-	if err != nil {
-		cg.Logf("%s :: FAILED to get leaders of partitions: %s\n", topic, err)
-		cg.errors <- &sarama.ConsumerError{
-			Topic:     topic,
-			Partition: -1,
-			Err:       err,
+		cg.Logf("%s :: Started topic consumer\n", topic)
+
+		// Fetch a list of partition IDs and watch the change
+		partitions, partitionChanges, err := cg.kazoo.Topic(topic).WatchPartitions()
+		if err != nil {
+			cg.Logf("%s :: FAILED to get and watch list of partitions: %s\n", topic, err)
+			cg.errors <- &sarama.ConsumerError{
+				Topic:     topic,
+				Partition: -1,
+				Err:       err,
+			}
+			return
 		}
-		return
+
+		partitionLeaders, err := retrievePartitionLeaders(partitions)
+		if err != nil {
+			cg.Logf("%s :: FAILED to get leaders of partitions: %s\n", topic, err)
+			cg.errors <- &sarama.ConsumerError{
+				Topic:     topic,
+				Partition: -1,
+				Err:       err,
+			}
+			return
+		}
+
+		dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitionLeaders)
+		myPartitions := dividedPartitions[cg.instance.ID]
+		cg.Logf("%s :: Claiming %d of %d partitions", topic, len(myPartitions), len(partitionLeaders))
+
+		topicStopper := make(chan struct{})
+
+		// Consume all the assigned partitions
+		var wg sync.WaitGroup
+		for _, pid := range myPartitions {
+
+			wg.Add(1)
+			go cg.partitionConsumer(topic, pid.ID, messages, errors, &wg, partitionConsumerReinitRetries, stopper, topicStopper)
+			partitionConsumerReinitRetries = 10
+		}
+
+		select {
+		case <-stopper:
+			wg.Wait()
+			return
+
+		case <-partitionChanges:
+			cg.Logf("Partition change. Rebalance partition assignment\n")
+			close(topicStopper)
+			wg.Wait()
+		}
 	}
 
-	dividedPartitions := dividePartitionsBetweenConsumers(cg.consumers, partitionLeaders)
-	myPartitions := dividedPartitions[cg.instance.ID]
-	cg.Logf("%s :: Claiming %d of %d partitions", topic, len(myPartitions), len(partitionLeaders))
-
-	// Consume all the assigned partitions
-	var wg sync.WaitGroup
-	for _, pid := range myPartitions {
-
-		wg.Add(1)
-		go cg.partitionConsumer(topic, pid.ID, messages, errors, &wg, stopper)
-	}
-
-	wg.Wait()
 	cg.Logf("%s :: Stopped topic consumer\n", topic)
 }
 
@@ -374,12 +392,16 @@ func (cg *ConsumerGroup) consumePartition(topic string, partition int32, nextOff
 }
 
 // Consumes a partition
-func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- error, wg *sync.WaitGroup, stopper <-chan struct{}) {
+func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- error, wg *sync.WaitGroup, maxReinitRetries int, stopper <-chan struct{}, topicStopper <-chan struct{}) {
 	defer wg.Done()
 
 	select {
 	case <-stopper:
 		return
+
+	case <-topicStopper:
+		return
+
 	default:
 	}
 
@@ -440,11 +462,21 @@ func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messag
 		}
 	}
 
-	consumer, err := cg.consumePartition(topic, partition, nextOffset)
+	var consumer sarama.PartitionConsumer
 
-	if err != nil {
-		cg.Logf("%s/%d :: FAILED to start partition consumer: %s\n", topic, partition, err)
-		return
+	// When the partition watcher finds there are new partitions, the new partitions may not be created immediately.
+	// Therefore, we need to retry for a while if it fails to re-initialize the partition consumer
+	for tries := 0; tries <= maxReinitRetries; tries++ {
+		consumer, err = cg.consumePartition(topic, partition, nextOffset)
+		if err == nil {
+			break
+		} else if tries < maxRetries {
+			cg.Logf("%s/%d :: FAILED to start partition consumer; retrying in 5 seconds. Error: %s\n", topic, partition, err)
+			time.Sleep(5 * time.Second)
+		} else {
+			cg.Logf("%s/%d :: FAILED to start partition consumer: %s\n", topic, partition, err)
+			return
+		}
 	}
 
 	defer consumer.Close()
@@ -455,6 +487,9 @@ partitionConsumerLoop:
 	for {
 		select {
 		case <-stopper:
+			break partitionConsumerLoop
+
+		case <-topicStopper:
 			break partitionConsumerLoop
 
 		case err := <-consumer.Errors():
@@ -477,6 +512,9 @@ partitionConsumerLoop:
 
 				case <-stopper:
 					break partitionConsumerLoop
+
+				case <-topicStopper:
+					break partitionConsumerLoop
 				}
 			}
 
@@ -497,6 +535,9 @@ partitionConsumerLoop:
 			for {
 				select {
 				case <-stopper:
+					break partitionConsumerLoop
+
+				case <-topicStopper:
 					break partitionConsumerLoop
 
 				case messages <- message:
