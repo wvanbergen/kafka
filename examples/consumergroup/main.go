@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/Shopify/sarama"
-	"github.com/wvanbergen/kafka/consumergroup"
+	"github.com/uber-archive/kafka/consumergroup"
 	"github.com/wvanbergen/kazoo-go"
 )
 
