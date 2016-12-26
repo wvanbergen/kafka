@@ -377,37 +377,35 @@ func (cg *ConsumerGroup) consumePartition(topic string, partition int32, nextOff
 func (cg *ConsumerGroup) partitionConsumer(topic string, partition int32, messages chan<- *sarama.ConsumerMessage, errors chan<- error, wg *sync.WaitGroup, stopper <-chan struct{}) {
 	defer wg.Done()
 
-	select {
-	case <-stopper:
-		return
-	default:
-	}
-
 	// Since ProcessingTimeout is the amount of time we'll wait for the final batch
 	// of messages to be processed before releasing a partition, we need to wait slightly
 	// longer than that before timing out here to ensure that another consumer has had
 	// enough time to release the partition. Hence, +2 seconds.
 	maxRetries := int(cg.config.Offsets.ProcessingTimeout/time.Second) + 2
+partitionClaimLoop:
 	for tries := 0; tries < maxRetries; tries++ {
-		if err := cg.instance.ClaimPartition(topic, partition); err == nil {
-			break
-		} else if tries+1 < maxRetries {
-			if err == kazoo.ErrPartitionClaimedByOther {
-				// Another consumer still owns this partition. We should wait longer for it to release it.
-				time.Sleep(1 * time.Second)
-			} else {
-				// An unexpected error occurred. Log it and continue trying until we hit the timeout.
-				cg.Logf("%s/%d :: FAILED to claim partition on attempt %v of %v; retrying in 1 second. Error: %v", topic, partition, tries+1, maxRetries, err)
-				time.Sleep(1 * time.Second)
-			}
-		} else {
-			cg.Logf("%s/%d :: FAILED to claim the partition: %s\n", topic, partition, err)
-			cg.errors <- &sarama.ConsumerError{
-				Topic:     topic,
-				Partition: partition,
-				Err:       err,
-			}
+		select {
+		case <-stopper:
 			return
+		case <-time.After(1 * time.Second):
+			if err := cg.instance.ClaimPartition(topic, partition); err == nil {
+				break partitionClaimLoop
+			} else if tries+1 < maxRetries {
+				if err == kazoo.ErrPartitionClaimedByOther {
+					// Another consumer still owns this partition. We should wait longer for it to release it.
+				} else {
+					// An unexpected error occurred. Log it and continue trying until we hit the timeout.
+					cg.Logf("%s/%d :: FAILED to claim partition on attempt %v of %v; retrying in 1 second. Error: %v", topic, partition, tries+1, maxRetries, err)
+				}
+			} else {
+				cg.Logf("%s/%d :: FAILED to claim the partition: %s\n", topic, partition, err)
+				cg.errors <- &sarama.ConsumerError{
+					Topic:     topic,
+					Partition: partition,
+					Err:       err,
+				}
+				return
+			}
 		}
 	}
 
