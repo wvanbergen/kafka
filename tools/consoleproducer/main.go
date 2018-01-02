@@ -48,6 +48,7 @@ func main() {
 
 	config := sarama.NewConfig()
 	config.Producer.Partitioner = partitionerConstructor
+	config.Producer.Return.Successes = true
 
 	producer, err := sarama.NewSyncProducer(strings.Split(*brokerList, ","), config)
 	if err != nil {
